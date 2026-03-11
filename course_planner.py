@@ -7,7 +7,7 @@ from tkinter import ttk, messagebox, simpledialog
 from typing import Optional, List, Dict
 import urllib.request
 import urllib.error
-# database path
+# database path 
 DB_PATH = "purdue_courses.db"
 
 class Course:
@@ -648,10 +648,12 @@ class CoursePlannerApp:
         
         plan = self.db.get_plan(self.current_plan_id)
         
+        # Normalize stored year values to a relative year index (1..duration).
         semesters = {}
         semester_types = {}
         for pc in plan_courses:
-            key = (pc.year, pc.semester)
+            rel_year = self._to_relative_year(pc.year)
+            key = (rel_year, pc.semester)
             if key not in semesters:
                 semesters[key] = []
                 semester_types[key] = pc.semester_type
@@ -671,13 +673,6 @@ class CoursePlannerApp:
         
         canvas.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
-        
-        # Force canvas to expand
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
-        
-        # Debug: show how many courses we have
-        tk.Label(scrollable, text=f"DEBUG: {len(plan_courses)} courses found",
-                font=('Roboto', 14, 'bold'), bg='#FFDD00', fg='black').pack(pady=10)
         
         term_names = {1: "Fall", 2: "Spring", 3: "Summer"}
         
@@ -832,8 +827,12 @@ class CoursePlannerApp:
         
         plan_courses = self.db.get_plan_courses(self.current_plan_id)
         
-        completed = {c.course.course_number for c in plan_courses 
-                   if c.status == 'completed' and c.year < pc.year}
+        # Compare using relative year indices so calendar years (e.g., 2024) work too.
+        completed = {
+            c.course.course_number
+            for c in plan_courses
+            if c.status == 'completed' and self._to_relative_year(c.year) < self._to_relative_year(pc.year)
+        }
         
         for prereq in pc.course.prerequisites:
             if prereq not in completed:
@@ -1085,17 +1084,17 @@ class CoursePlannerApp:
         next_year = 1
         max_key = 0
         
+        # Use normalized (relative) year for computing next-slot
         for pc in plan_courses:
-            key = pc.year * 10 + pc.semester
+            key = self._to_relative_year(pc.year) * 10 + pc.semester
             if key > max_key:
                 max_key = key
         
-        if max_key > 0:
-            next_year = (max_key // 10) + (1 if max_key % 10 == 3 else 0)
-            next_sem = (max_key % 10) + 1
-            if next_sem > 3:
-                next_sem = 1
-                next_year += 1
+        next_year = (max_key // 10) + (1 if max_key % 10 == 3 else 0)
+        next_sem = (max_key % 10) + 1
+        if next_sem > 3:
+            next_sem = 1
+            next_year += 1
         
         if next_year > self.current_plan_duration:
             next_year = self.current_plan_duration
@@ -1327,6 +1326,28 @@ class CoursePlannerApp:
         self._show_catalog_view()
         messagebox.showinfo("Add Course", 
                           f"Use the catalog to find and add courses.\nThey will be added to Year {year}, Semester {semester}.")
+    
+    def _to_relative_year(self, year_value: int) -> int:
+        """
+        Convert stored year value into plan-relative year (1..duration).
+        If year_value is a small integer <= duration it's already relative.
+        If it's a calendar year (e.g. 2024), convert using current_plan_start_year.
+        """
+        try:
+            if year_value is None:
+                return 1
+            # If it looks like a calendar year (>= reasonable threshold) convert it.
+            if year_value > self.current_plan_duration:
+                rel = year_value - self.current_plan_start_year + 1
+                # Clamp into valid range
+                if rel < 1:
+                    rel = 1
+                if rel > self.current_plan_duration:
+                    rel = self.current_plan_duration
+                return rel
+            return year_value
+        except Exception:
+            return year_value
     
     def run(self):
         self.root.mainloop()
