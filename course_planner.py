@@ -7,7 +7,7 @@ from tkinter import ttk, messagebox, simpledialog
 from typing import Optional, List, Dict
 import urllib.request
 import urllib.error
-
+# database path
 DB_PATH = "purdue_courses.db"
 
 class Course:
