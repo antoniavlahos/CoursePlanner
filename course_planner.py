@@ -1,9 +1,19 @@
+import sys
 import sqlite3
 import json
 import threading
 from datetime import datetime
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, simpledialog
+except ModuleNotFoundError as e:
+    print("ERROR: Tkinter is not available in this Python build.\n"
+          "Install a Python distribution that includes Tk (e.g., python.org installer)\n"
+          "or install Tcl/Tk and use a Python build linked against it.\n"
+          f"Original error: {e}")
+    sys.exit(1)
+
 from typing import Optional, List, Dict
 import urllib.request
 import urllib.error
@@ -626,130 +636,126 @@ class CoursePlannerApp:
     
     def _display_plan_view(self):
         self._clear_content()
-        
+
         if not self.current_plan_id:
             self._display_no_plan_message()
             return
-        
+
         plan_courses = self.db.get_plan_courses(self.current_plan_id)
-        
+        plan = self.db.get_plan(self.current_plan_id)
+
         if not plan_courses:
-            plan = self.db.get_plan(self.current_plan_id)
             frame = tk.Frame(self.content_container, bg='#F8F9FA')
             frame.pack(fill='both', expand=True, pady=100)
-            
-            tk.Label(frame, text="No Courses in Plan", 
+            tk.Label(frame, text="No Courses in Plan",
                     font=('Roboto Slab', 20, 'bold'), bg='#F8F9FA', fg='#0A2463').pack(pady=10)
             tk.Label(frame, text=f"Plan: {plan['name']}",
                     font=('Roboto', 12), bg='#F8F9FA', fg='#6C757D').pack()
             tk.Label(frame, text="Go to Course Catalog to add courses",
                     font=('Roboto', 12), bg='#F8F9FA', fg='#6C757D').pack()
             return
-        
-        plan = self.db.get_plan(self.current_plan_id)
-        
-        # Normalize stored year values to a relative year index (1..duration).
-        semesters = {}
-        semester_types = {}
-        for pc in plan_courses:
-            rel_year = self._to_relative_year(pc.year)
-            key = (rel_year, pc.semester)
-            if key not in semesters:
-                semesters[key] = []
-                semester_types[key] = pc.semester_type
-            semesters[key].append(pc)
-        
-        # Simple scrollable frame
-        main_canvas_frame = tk.Frame(self.content_container)
-        main_canvas_frame.pack(fill='both', expand=True)
-        
-        canvas = tk.Canvas(main_canvas_frame, bg='#F8F9FA')
-        scrollbar = ttk.Scrollbar(main_canvas_frame, orient='vertical', command=canvas.yview)
-        scrollable = tk.Frame(canvas, bg='#F8F9FA')
-        
-        scrollable.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas_window = canvas.create_window((0, 0), window=scrollable, anchor='nw')
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        canvas.pack(side='left', fill='both', expand=True)
-        scrollbar.pack(side='right', fill='y')
-        
+
         term_names = {1: "Fall", 2: "Spring", 3: "Summer"}
-        
-        for year in range(1, self.current_plan_duration + 1):
-            year_label = tk.Label(scrollable, text=f"Year {year}",
-                                  font=('Roboto Slab', 18, 'bold'), bg='#F8F9FA',
-                                  fg='#0A2463')
-            year_label.pack(anchor='w', pady=(15, 10), padx=10)
-            
-            semesters_frame = tk.Frame(scrollable, bg='#F8F9FA')
-            semesters_frame.pack(fill='x', padx=10)
-            
-            for sem_num in [1, 2, 3]:
-                key = (year, sem_num)
-                courses = semesters.get(key, [])
-                sem_type = semester_types.get(key, 'regular')
-                
-                sem_frame = tk.Frame(semesters_frame, bg='white', relief='flat',
-                                     borderwidth=1, width=300)
-                sem_frame.pack(side='left', fill='both', expand=True, padx=5)
-                sem_frame.pack_propagate(False)
-                
-                header_colors = {
-                    'regular': '#0A2463',
-                    'study_abroad': '#17A2B8',
-                    'coop': '#FFC107',
-                    'off': '#6C757D'
-                }
-                
-                sem_header = tk.Frame(sem_frame, bg=header_colors.get(sem_type, '#0A2463'))
-                sem_header.pack(fill='x')
-                
-                term_name = f"{term_names.get(sem_num, '')} {self.current_plan_start_year + year - 1}"
-                tk.Label(sem_header, text=term_name,
-                        font=('Roboto', 11, 'bold'), bg=header_colors.get(sem_type, '#0A2463'), 
-                        fg='white').pack(pady=8)
-                
-                type_label = tk.Label(sem_header, 
-                                    text=f"({sem_type.replace('_', ' ').title()})",
-                                    font=('Roboto', 9), bg=header_colors.get(sem_type, '#0A2463'),
-                                    fg='white')
-                type_label.pack()
-                
-                courses_container = tk.Frame(sem_frame, bg='white')
-                courses_container.pack(fill='both', expand=True, padx=10, pady=10)
-                
-                total_credits = 0
-                for pc in courses:
-                    total_credits += pc.course.credits
-                    self._create_plan_course_card(courses_container, pc)
-                
-                if not courses:
-                    tk.Label(courses_container, text="No courses",
-                            font=('Roboto', 10), bg='white', fg='#6C757D').pack()
-                
-                credits_label = tk.Label(sem_frame, 
-                                         text=f"Total: {total_credits} credits",
-                                         font=('Roboto', 10, 'bold'), bg='white',
-                                         fg='#0A2463')
-                credits_label.pack(pady=(0, 10))
-                
-                btn_frame = tk.Frame(sem_frame, bg='white')
-                btn_frame.pack(pady=(0, 10))
-                
-                add_btn = tk.Button(btn_frame, text="+ Add",
-                                   font=('Roboto', 9), bg='#28A745', fg='white',
-                                   relief='flat', pady=4, padx=8,
-                                   command=lambda y=year, s=sem_num: self._show_add_course_dialog_for_semester(y, s))
-                add_btn.pack(side='left', padx=2)
-                
-                type_btn = tk.Button(btn_frame, text="Type",
-                                   font=('Roboto', 9), bg='#17A2B8', fg='white',
-                                   relief='flat', pady=4, padx=8,
-                                   command=lambda y=year, s=sem_num: self._change_semester_type(y, s))
-                type_btn.pack(side='left', padx=2)
-        
-        scrollable.grid_columnconfigure(0, weight=1)
+        total_credits = sum(pc.course.credits for pc in plan_courses)
+        completed_credits = sum(pc.course.credits for pc in plan_courses if pc.status == 'completed')
+
+        # ── Summary bar ──────────────────────────────────────────────────────────
+        summary_frame = tk.Frame(self.content_container, bg='white', relief='flat',
+                                  borderwidth=1)
+        summary_frame.pack(fill='x', pady=(0, 8))
+        tk.Label(summary_frame, text=f"Plan: {plan['name']}",
+                font=('Roboto', 12, 'bold'), bg='white', fg='#0A2463').pack(side='left', padx=15, pady=8)
+        tk.Label(summary_frame, text=f"Dept: {plan['department']}",
+                font=('Roboto', 11), bg='white', fg='#6C757D').pack(side='left', padx=10)
+        tk.Label(summary_frame,
+                text=f"Credits: {total_credits} planned  |  {completed_credits} completed",
+                font=('Roboto', 11), bg='white', fg='#0A2463').pack(side='right', padx=15)
+
+        # ── Course list (Treeview from SQLite) ───────────────────────────────────
+        list_frame = tk.Frame(self.content_container, bg='#F8F9FA')
+        list_frame.pack(fill='both', expand=True)
+
+        columns = ('course', 'title', 'credits', 'dept', 'year', 'semester', 'status', 'grade')
+        tree = ttk.Treeview(list_frame, columns=columns, show='headings',
+                            selectmode='browse')
+
+        tree.heading('course',   text='Course #')
+        tree.heading('title',    text='Title')
+        tree.heading('credits',  text='Cr')
+        tree.heading('dept',     text='Dept')
+        tree.heading('year',     text='Year')
+        tree.heading('semester', text='Semester')
+        tree.heading('status',   text='Status')
+        tree.heading('grade',    text='Grade')
+
+        tree.column('course',   width=90,  minwidth=80,  anchor='w')
+        tree.column('title',    width=320, minwidth=200, anchor='w', stretch=True)
+        tree.column('credits',  width=35,  minwidth=30,  anchor='center')
+        tree.column('dept',     width=60,  minwidth=50,  anchor='center')
+        tree.column('year',     width=110, minwidth=80,  anchor='center')
+        tree.column('semester', width=75,  minwidth=60,  anchor='center')
+        tree.column('status',   width=100, minwidth=80,  anchor='center')
+        tree.column('grade',    width=55,  minwidth=40,  anchor='center')
+
+        tree.tag_configure('planned',     background='#FFF8E1', foreground='#5D4037')
+        tree.tag_configure('in_progress', background='#E1F5FE', foreground='#01579B')
+        tree.tag_configure('completed',   background='#E8F5E9', foreground='#1B5E20')
+
+        vsb = ttk.Scrollbar(list_frame, orient='vertical', command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y')
+        tree.pack(side='left', fill='both', expand=True)
+
+        self._plan_tree_items = {}
+        sorted_courses = sorted(plan_courses,
+                                key=lambda pc: (self._to_relative_year(pc.year), pc.semester))
+        for pc in sorted_courses:
+            rel_year = self._to_relative_year(pc.year)
+            cal_year = self.current_plan_start_year + rel_year - 1
+            year_str = f"Yr {rel_year} ({cal_year})"
+            sem_name = term_names.get(pc.semester, str(pc.semester))
+            status_label = pc.status.replace('_', ' ').title()
+            row_id = tree.insert('', 'end', tags=(pc.status,), values=(
+                pc.course.course_number,
+                pc.course.title,
+                pc.course.credits,
+                pc.course.department,
+                year_str,
+                sem_name,
+                status_label,
+                pc.grade or '-',
+            ))
+            self._plan_tree_items[row_id] = pc
+
+        # ── Action buttons ────────────────────────────────────────────────────────
+        btn_frame = tk.Frame(self.content_container, bg='#F8F9FA')
+        btn_frame.pack(fill='x', pady=8)
+
+        def _selected_pc():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("Select Course", "Please select a course in the list first.")
+                return None
+            return self._plan_tree_items[sel[0]]
+
+        def on_toggle_status():
+            pc = _selected_pc()
+            if pc:
+                self._cycle_status(pc)
+
+        def on_remove():
+            pc = _selected_pc()
+            if pc:
+                self._remove_course(pc)
+
+        tk.Button(btn_frame, text="Toggle Status",
+                 font=('Roboto', 10, 'bold'), bg='#17A2B8', fg='white',
+                 relief='flat', padx=12, pady=6, cursor='hand2',
+                 command=on_toggle_status).pack(side='left', padx=(0, 8))
+        tk.Button(btn_frame, text="Remove Selected",
+                 font=('Roboto', 10, 'bold'), bg='#DC3545', fg='white',
+                 relief='flat', padx=12, pady=6, cursor='hand2',
+                 command=on_remove).pack(side='left')
     
     def _change_semester_type(self, year: int, semester: int):
         dialog = tk.Toplevel(self.root)

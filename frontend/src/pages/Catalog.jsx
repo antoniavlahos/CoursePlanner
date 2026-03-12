@@ -1,0 +1,196 @@
+import { useState, useEffect, useCallback } from 'react'
+import { usePlan } from '../App.jsx'
+import { getCourses, getDepartments, addCourseToPlan } from '../api.js'
+
+const TERMS = { 1: 'Fall', 2: 'Spring', 3: 'Summer' }
+
+function AddModal({ course, plan, onClose, onAdded }) {
+  const [year, setYear] = useState(1)
+  const [semester, setSemester] = useState(1)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleAdd() {
+    setLoading(true)
+    setError('')
+    try {
+      await addCourseToPlan(plan.id, { course_id: course.id, semester, year })
+      onAdded()
+      onClose()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-title">Add to Plan</div>
+
+        {/* Course info strip */}
+        <div style={{ background: '#f8f8f8', borderRadius: 8, padding: '10px 14px', marginBottom: 20 }}>
+          <div style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: '1rem', color: 'var(--blue)', marginBottom: 2 }}>
+            {course.course_number}
+          </div>
+          <div style={{ fontWeight: 600, fontSize: '.92rem', marginBottom: 4 }}>{course.title}</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ fontSize: '.78rem', color: 'var(--muted)' }}>{course.credits} credits · {course.department}</span>
+            {course.prerequisites.length > 0 && (
+              <span style={{ fontSize: '.75rem', background: '#fff3cd', color: '#856404', padding: '1px 8px', borderRadius: 12 }}>
+                Prereqs: {course.prerequisites.join(', ')}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Year picker */}
+        <div className="form-group">
+          <label>Year</label>
+          <div className="pill-group">
+            {Array.from({ length: plan.duration_years }, (_, i) => i + 1).map((y) => (
+              <label key={y}>
+                <input type="radio" name="year" value={y} checked={year === y} onChange={() => setYear(y)} />
+                Year {y}
+                <span className="pill-sub">{plan.start_year + y - 1}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {/* Semester picker */}
+        <div className="form-group">
+          <label>Semester</label>
+          <div className="pill-group">
+            {[[ 1, 'Fall', '🍂' ], [ 2, 'Spring', '🌱' ], [ 3, 'Summer', '☀️' ]].map(([val, name, icon]) => (
+              <label key={val}>
+                <input type="radio" name="sem" value={val} checked={semester === val} onChange={() => setSemester(val)} />
+                {icon} {name}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {error && <div className="error-msg">{error}</div>}
+
+        <div className="modal-actions">
+          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn btn-success" onClick={handleAdd} disabled={loading}>
+            {loading ? 'Adding…' : '+ Add to Plan'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CourseCard({ course, plan, onAdded }) {
+  const [showModal, setShowModal] = useState(false)
+  return (
+    <div className="course-card">
+      <div style={{ flex: 1 }}>
+        <div className="course-num">{course.course_number}</div>
+        <div className="course-title">{course.title}</div>
+        <div className="course-desc">
+          {course.description.length > 130 ? course.description.slice(0, 130) + '…' : course.description}
+        </div>
+        <div className="course-meta">
+          <span className="meta-tag meta-credits">{course.credits} cr</span>
+          <span className="meta-tag meta-dept">{course.department}</span>
+          <span className="meta-tag meta-terms">{course.terms_offered.join(', ')}</span>
+          {course.prerequisites.length > 0 && (
+            <span className="meta-tag meta-prereq">
+              Prereqs: {course.prerequisites.slice(0,3).join(', ')}{course.prerequisites.length > 3 ? '…' : ''}
+            </span>
+          )}
+        </div>
+      </div>
+      {plan && (
+        <div style={{ flexShrink: 0 }}>
+          <button className="btn btn-success btn-sm" onClick={() => setShowModal(true)}>
+            Add to Plan
+          </button>
+        </div>
+      )}
+      {showModal && (
+        <AddModal course={course} plan={plan} onClose={() => setShowModal(false)} onAdded={onAdded} />
+      )}
+    </div>
+  )
+}
+
+export default function Catalog() {
+  const { currentPlanId, currentPlan } = usePlan()
+  const [courses, setCourses] = useState([])
+  const [departments, setDepartments] = useState([])
+  const [query, setQuery] = useState('')
+  const [dept, setDept] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [addedTick, setAddedTick] = useState(0)
+
+  useEffect(() => { getDepartments().then(setDepartments) }, [])
+
+  const search = useCallback(() => {
+    setLoading(true)
+    getCourses(query, dept)
+      .then(setCourses)
+      .finally(() => setLoading(false))
+  }, [query, dept])
+
+  useEffect(() => { search() }, [dept, addedTick])
+
+  function handleKey(e) { if (e.key === 'Enter') search() }
+
+  return (
+    <>
+      <h1 className="page-title">Course Catalog</h1>
+
+      <div className="search-bar">
+        <input
+          placeholder="Search by course number or title…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={handleKey}
+        />
+        <select value={dept} onChange={(e) => setDept(e.target.value)}>
+          <option value="">All Departments</option>
+          {departments.map((d) => (
+            <option key={d.code} value={d.code}>{d.code} – {d.name}</option>
+          ))}
+        </select>
+        <button className="btn btn-primary" onClick={search} style={{ width: 90, flexShrink: 0 }}>
+          Search
+        </button>
+      </div>
+
+      {!currentPlanId && (
+        <div style={{ background: '#fff8e1', color: '#856404', padding: '10px 14px', borderRadius: 8, marginBottom: 14, fontSize: '.85rem' }}>
+          ⚠️ No plan selected. Create or load a plan in <strong>Settings</strong> to add courses.
+        </div>
+      )}
+
+      {loading ? (
+        <div className="loading">Loading courses…</div>
+      ) : (
+        <>
+          <div style={{ fontSize: '.8rem', color: 'var(--muted)', marginBottom: 10 }}>
+            {courses.length} course{courses.length !== 1 ? 's' : ''} found
+          </div>
+          {courses.length === 0 ? (
+            <div className="empty-state"><h3>No courses found</h3><p>Try a different search term or department filter.</p></div>
+          ) : (
+            courses.map((c) => (
+              <CourseCard
+                key={c.id}
+                course={c}
+                plan={currentPlan}
+                onAdded={() => setAddedTick((t) => t + 1)}
+              />
+            ))
+          )}
+        </>
+      )}
+    </>
+  )
+}
