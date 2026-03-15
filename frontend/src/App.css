@@ -137,6 +137,62 @@ input:focus, select:focus, textarea:focus { border-color: var(--gold-2); box-sha
 .req-name { font-weight: 600; font-size: .88rem; }
 .req-desc { font-size: .78rem; color: var(--muted); margin-top: 1px; }
 
+/* ── Course detail drawer ─────────────────────────────────────────────────── */
+@keyframes drawerSlideIn  { from { transform: translateX(100%) } to { transform: translateX(0) } }
+@keyframes drawerFadeIn   { from { opacity: 0 }                  to { opacity: 1 }              }
+
+.drawer-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.38); z-index: 400;
+  animation: drawerFadeIn .18s ease;
+}
+.drawer {
+  position: fixed; top: 0; right: 0; height: 100vh; width: 480px; max-width: 96vw;
+  background: #fff; box-shadow: -6px 0 32px rgba(0,0,0,.18);
+  z-index: 401; display: flex; flex-direction: column;
+  animation: drawerSlideIn .22s cubic-bezier(.25,.46,.45,.94);
+}
+.drawer-header {
+  padding: 22px 24px 18px; background: var(--blue); color: #fff; flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 4px; position: relative;
+}
+.drawer-close {
+  position: absolute; top: 14px; right: 16px;
+  background: rgba(255,255,255,.12); color: #fff; border: none;
+  border-radius: 50%; width: 30px; height: 30px; font-size: 14px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background .12s;
+}
+.drawer-close:hover { background: rgba(255,255,255,.24); opacity: 1; }
+.drawer-course-num  { font-family: 'Courier New', monospace; font-size: 1rem; font-weight: 700; color: var(--gold); }
+.drawer-course-title { font-size: 1.15rem; font-weight: 700; color: #fff; line-height: 1.3; padding-right: 36px; }
+.drawer-body { flex: 1; overflow-y: auto; padding: 22px 24px; }
+.drawer-footer { padding: 14px 24px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; flex-shrink: 0; background: #fafafa; }
+
+.drawer-badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+.drawer-section { margin-bottom: 22px; }
+.drawer-section-title {
+  font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--muted); margin-bottom: 8px; padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.drawer-desc { font-size: .9rem; line-height: 1.65; color: var(--text); margin: 0; }
+.drawer-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  font-size: .8rem; padding: 4px 12px; border-radius: 20px;
+  font-family: 'Courier New', monospace; font-weight: 600;
+}
+.chip-prereq  { background: #fff3cd; color: #856404; }
+.chip-coreq   { background: #e1f5fe; color: #01579b; }
+.chip-term    { background: #e8f5e9; color: #1b5e20; }
+
+/* Make course numbers in tables / cards clickable */
+.course-link {
+  cursor: pointer; text-decoration: none;
+  border-bottom: 1px dashed currentColor; padding-bottom: 1px;
+  transition: opacity .12s;
+}
+.course-link:hover { opacity: .7; }
+
 /* ── Misc ────────────────────────────────────────────────────────────────── */
 .empty-state { text-align: center; padding: 60px 20px; color: var(--muted); }
 .empty-state h3 { color: var(--blue); margin-bottom: 8px; }

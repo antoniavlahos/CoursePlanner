@@ -41,3 +41,5 @@ export const updatePlanCourse = (pcId, body) =>
 export const getAiStatus = () => req('/ai/status')
 export const getAiRecommendations = (body) =>
   req('/ai/recommend', { method: 'POST', body: JSON.stringify(body) })
+export const getAiProgramPlan = (body) =>
+  req('/ai/program-plan', { method: 'POST', body: JSON.stringify(body) })

@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
 import { usePlan } from '../App.jsx'
 import { getCourses, getDepartments, addCourseToPlan } from '../api.js'
+import CourseDetailDrawer from '../components/CourseDetailDrawer.jsx'
 
 const TERMS = { 1: 'Fall', 2: 'Spring', 3: 'Summer' }
 
+// ── Add-to-Plan modal ─────────────────────────────────────────────────────────
 function AddModal({ course, plan, onClose, onAdded }) {
   const [year, setYear] = useState(1)
   const [semester, setSemester] = useState(1)
@@ -85,15 +87,30 @@ function AddModal({ course, plan, onClose, onAdded }) {
   )
 }
 
-function CourseCard({ course, plan, onAdded }) {
-  const [showModal, setShowModal] = useState(false)
+// ── Course card ───────────────────────────────────────────────────────────────
+function CourseCard({ course, plan, onDetails, onAdd }) {
   return (
     <div className="course-card">
       <div style={{ flex: 1 }}>
-        <div className="course-num">{course.course_number}</div>
-        <div className="course-title">{course.title}</div>
+        {/* Clickable course number + title open the detail drawer */}
+        <div
+          className="course-num course-link"
+          onClick={() => onDetails(course)}
+          title="View details"
+        >
+          {course.course_number}
+        </div>
+        <div
+          className="course-title course-link"
+          onClick={() => onDetails(course)}
+          style={{ color: 'var(--text)' }}
+        >
+          {course.title}
+        </div>
         <div className="course-desc">
-          {course.description.length > 130 ? course.description.slice(0, 130) + '…' : course.description}
+          {course.description.length > 130
+            ? course.description.slice(0, 130) + '…'
+            : course.description}
         </div>
         <div className="course-meta">
           <span className="meta-tag meta-credits">{course.credits} cr</span>
@@ -101,33 +118,44 @@ function CourseCard({ course, plan, onAdded }) {
           <span className="meta-tag meta-terms">{course.terms_offered.join(', ')}</span>
           {course.prerequisites.length > 0 && (
             <span className="meta-tag meta-prereq">
-              Prereqs: {course.prerequisites.slice(0,3).join(', ')}{course.prerequisites.length > 3 ? '…' : ''}
+              Prereqs: {course.prerequisites.slice(0, 3).join(', ')}{course.prerequisites.length > 3 ? '…' : ''}
             </span>
           )}
         </div>
       </div>
+
       {plan && (
-        <div style={{ flexShrink: 0 }}>
-          <button className="btn btn-success btn-sm" onClick={() => setShowModal(true)}>
+        <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <button className="btn btn-success btn-sm" onClick={() => onAdd(course)}>
             Add to Plan
           </button>
+          <button
+            className="btn btn-sm"
+            style={{ background: '#f0f0f0', color: 'var(--text)' }}
+            onClick={() => onDetails(course)}
+          >
+            Details
+          </button>
         </div>
-      )}
-      {showModal && (
-        <AddModal course={course} plan={plan} onClose={() => setShowModal(false)} onAdded={onAdded} />
       )}
     </div>
   )
 }
 
+// ── Page ─────────────────────────────────────────────────────────────────────
 export default function Catalog() {
   const { currentPlanId, currentPlan } = usePlan()
-  const [courses, setCourses] = useState([])
+  const [courses, setCourses]       = useState([])
   const [departments, setDepartments] = useState([])
-  const [query, setQuery] = useState('')
-  const [dept, setDept] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [addedTick, setAddedTick] = useState(0)
+  const [query, setQuery]           = useState('')
+  const [dept, setDept]             = useState('')
+  const [loading, setLoading]       = useState(true)
+  const [addedTick, setAddedTick]   = useState(0)
+
+  // Detail drawer state
+  const [drawerCourse, setDrawerCourse]   = useState(null)
+  // Add-modal state (separate so drawer can stay open or close first)
+  const [addModalCourse, setAddModalCourse] = useState(null)
 
   useEffect(() => { getDepartments().then(setDepartments) }, [])
 
@@ -141,6 +169,15 @@ export default function Catalog() {
   useEffect(() => { search() }, [dept, addedTick])
 
   function handleKey(e) { if (e.key === 'Enter') search() }
+
+  function openDetails(course) {
+    setDrawerCourse(course)
+  }
+
+  function openAdd(course) {
+    setDrawerCourse(null)   // close drawer first so modals don't stack
+    setAddModalCourse(course)
+  }
 
   return (
     <>
@@ -176,20 +213,51 @@ export default function Catalog() {
         <>
           <div style={{ fontSize: '.8rem', color: 'var(--muted)', marginBottom: 10 }}>
             {courses.length} course{courses.length !== 1 ? 's' : ''} found
+            <span style={{ marginLeft: 8, opacity: .7 }}>— click a course name to see full details</span>
           </div>
           {courses.length === 0 ? (
-            <div className="empty-state"><h3>No courses found</h3><p>Try a different search term or department filter.</p></div>
+            <div className="empty-state">
+              <h3>No courses found</h3>
+              <p>Try a different search term or department filter.</p>
+            </div>
           ) : (
             courses.map((c) => (
               <CourseCard
                 key={c.id}
                 course={c}
                 plan={currentPlan}
-                onAdded={() => setAddedTick((t) => t + 1)}
+                onDetails={openDetails}
+                onAdd={openAdd}
               />
             ))
           )}
         </>
+      )}
+
+      {/* Detail drawer */}
+      {drawerCourse && (
+        <CourseDetailDrawer
+          course={drawerCourse}
+          onClose={() => setDrawerCourse(null)}
+          actions={currentPlan && (
+            <button
+              className="btn btn-success"
+              onClick={() => openAdd(drawerCourse)}
+            >
+              + Add to Plan
+            </button>
+          )}
+        />
+      )}
+
+      {/* Add-to-plan modal */}
+      {addModalCourse && currentPlan && (
+        <AddModal
+          course={addModalCourse}
+          plan={currentPlan}
+          onClose={() => setAddModalCourse(null)}
+          onAdded={() => setAddedTick((t) => t + 1)}
+        />
       )}
     </>
   )

@@ -206,6 +206,22 @@ class Database:
         )
         self.conn.commit()
 
+    def update_plan_course_slot(self, plan_course_id: int,
+                                year: Optional[int] = None,
+                                semester: Optional[int] = None):
+        """Move a plan course to a different year / semester."""
+        fields, vals = [], []
+        if year is not None:
+            fields.append('year = ?'); vals.append(year)
+        if semester is not None:
+            fields.append('semester = ?'); vals.append(semester)
+        if fields:
+            vals.append(plan_course_id)
+            self.conn.execute(
+                f"UPDATE plan_courses SET {', '.join(fields)} WHERE id = ?", vals
+            )
+            self.conn.commit()
+
     def get_plan_courses(self, plan_id: int) -> List[PlanCourse]:
         cursor = self.conn.cursor()
         cursor.execute(
@@ -250,6 +266,48 @@ class Database:
         self.conn.close()
 
 
+# ── Keyword search helper ──────────────────────────────────────────────────────
+
+_STOP_WORDS = {
+    'i', 'a', 'an', 'the', 'and', 'or', 'in', 'of', 'is', 'are', 'for', 'with',
+    'my', 'am', 'be', 'would', 'like', 'want', 'to', 'learn', 'study', 'take',
+    'course', 'class', 'courses', 'classes', 'purdue', 'looking', 'interested',
+    'interest', 'get', 'have', 'has', 'was', 'were', 'will', 'can', 'how', 'what',
+    'which', 'that', 'this', 'it', 'at', 'as', 'by', 'on', 'up', 'do', 'did',
+    'not', 'but', 'so', 'if', 'more', 'some', 'me', 'us', 'we', 'they', 'their',
+    'about', 'into', 'from', 'also', 'just', 'any', 'all', 'one', 'two', 'three',
+    'good', 'great', 'really', 'very', 'too', 'much', 'many', 'most', 'other',
+    'new', 'use', 'used', 'using', 'need', 'needed', 'able', 'help', 'make',
+}
+
+
+def _keyword_search(query: str, courses: List[Course], top_n: int = 40) -> List[tuple]:
+    """Score courses against a free-text query using title (3×) and description (1×) hits.
+
+    Returns a list of (score, Course) tuples sorted by descending score, capped at top_n.
+    """
+    tokens = re.findall(r'\b[a-zA-Z]{3,}\b', query.lower())
+    keywords = [t for t in tokens if t not in _STOP_WORDS]
+    if not keywords:
+        return []
+
+    scored = []
+    for course in courses:
+        title_lower = (course.title or '').lower()
+        desc_lower  = (course.description or '').lower()
+        score = sum(
+            (3 if kw in title_lower else 0) + (1 if kw in desc_lower else 0)
+            for kw in keywords
+        )
+        if score > 0:
+            scored.append((score, course))
+
+    scored.sort(key=lambda x: -x[0])
+    return scored[:top_n]
+
+
+# ── LLM planner ───────────────────────────────────────────────────────────────
+
 class LLMCoursePlanner:
     def __init__(self):
         self.base_url = "http://localhost:11434"
@@ -276,26 +334,35 @@ class LLMCoursePlanner:
             return False
 
     def get_recommendations(self, interests: str, completed: List[str],
-                            department: str, available_courses: List[str] = None) -> List[dict]:
-        if not self.is_available():
+                            department: str, candidate_courses: List[Course] = None) -> List[dict]:
+        """Two-phase recommendation: caller pre-filters candidates via keyword search,
+        then this method asks the LLM to pick the 5-8 most relevant, given each
+        course's actual title and description so it can reason accurately."""
+        if not self.is_available() or not candidate_courses:
             return []
 
-        course_list = ', '.join(available_courses) if available_courses else (
-            'CS 18000, CS 18200, CS 24000, CS 25000, CS 25100, CS 30700, CS 35400, '
-            'CS 37300, CS 40800, CS 42600, CS 43000, CS 45600, CS 47800, '
-            'MA 16100, MA 16200, MA 26100, MA 35100, MA 36600, '
-            'STAT 35000, PHYS 17200, PHYS 27200, ECON 11000, PSY 10000'
-        )
+        # Build a compact catalogue block: course_number: title — description_preview
+        course_lines = []
+        for c in candidate_courses:
+            desc = (c.description or '').replace('\n', ' ')[:120].strip()
+            if desc:
+                course_lines.append(f"{c.course_number}: {c.title} — {desc}")
+            else:
+                course_lines.append(f"{c.course_number}: {c.title}")
+
+        course_block  = '\n'.join(course_lines)
+        completed_str = ', '.join(completed) if completed else 'none'
 
         prompt = (
-            f"You are a Purdue University academic advisor. "
-            f"A student in the {department} major has these interests: {interests}\n"
-            f"Completed courses: {', '.join(completed) if completed else 'none'}\n\n"
-            f"Choose 5-8 courses to recommend from ONLY this list (do not invent course numbers):\n"
-            f"{course_list}\n\n"
-            "Consider prerequisites and the student's stated interests.\n"
-            "Respond ONLY with a valid JSON array – no explanation, no markdown fences:\n"
-            '[{"course_number": "DEPT 00000", "reason": "one sentence reason"}, ...]'
+            f"You are a Purdue University academic advisor.\n"
+            f"A student in the {department} program says: \"{interests}\"\n"
+            f"Courses already completed: {completed_str}\n\n"
+            f"From the list below, select the 5-8 courses MOST relevant to the student's goals. "
+            f"Use ONLY course numbers from this exact list. "
+            f"Do not invent or modify any course number.\n\n"
+            f"{course_block}\n\n"
+            "Respond ONLY with a valid JSON array, no explanation, no code fences:\n"
+            '[{"course_number": "DEPT 00000", "reason": "one sentence explaining relevance"}, ...]'
         )
 
         try:
@@ -309,11 +376,9 @@ class LLMCoursePlanner:
                 result = json.loads(response.read().decode())
                 text = result.get('response', '')
 
-                # Ollama ≥0.17 surfaces reasoning separately in a 'thinking' field;
-                # older builds embedded it as <think>…</think> inside 'response'.
-                # Strip legacy tags in case the response field still contains them.
+                # Ollama ≥0.17 surfaces reasoning in a separate 'thinking' field;
+                # strip legacy <think>…</think> tags just in case.
                 text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-                # Strip markdown code fences if present
                 text = re.sub(r'```[a-z]*\n?', '', text)
 
                 start = text.find('[')
@@ -328,7 +393,11 @@ class LLMCoursePlanner:
                 for r in recs:
                     c = db.get_course_by_number(r.get('course_number', '').strip())
                     if c:
-                        out.append({'course': c.to_dict(), 'reason': r.get('reason', '')})
+                        out.append({
+                            'course': c.to_dict(),
+                            'reason': r.get('reason', ''),
+                            'ai_ranked': True,
+                        })
                     else:
                         print(f"LLM recommended unknown course: {r.get('course_number')}")
                 db.close()
@@ -457,11 +526,15 @@ def remove_plan_course(pc_id):
 
 @app.route('/api/plan-courses/<int:pc_id>', methods=['PATCH'])
 def update_plan_course(pc_id):
-    body = request.get_json(force=True)
-    status = body.get('status')
-    grade = body.get('grade')
+    body     = request.get_json(force=True)
+    status   = body.get('status')
+    grade    = body.get('grade')
+    year     = body.get('year')
+    semester = body.get('semester')
     if status:
         _db.update_course_status(pc_id, status, grade)
+    if year is not None or semester is not None:
+        _db.update_plan_course_slot(pc_id, year, semester)
     return jsonify({'ok': True})
 
 
@@ -474,29 +547,303 @@ def ai_status():
 
 @app.route('/api/ai/recommend', methods=['POST'])
 def ai_recommend():
-    body = request.get_json(force=True)
-    interests = body.get('interests', '')
-    completed = body.get('completed_courses', [])
+    body       = request.get_json(force=True)
+    interests  = (body.get('interests') or '').strip()
+    completed  = body.get('completed_courses', [])
     department = body.get('department', 'CS')
 
-    # Build a *focused* course list so we don't overflow the model's context window.
-    # The full DB has 6,000+ courses across 150+ departments; passing them all (~20K tokens)
-    # breaks local LLMs.  Instead include:
-    #   1. Every course in the student's primary department
-    #   2. Common core / service departments taken by most majors
-    #   3. Any department already represented in the student's completed courses
-    CORE_DEPTS = {'MA', 'STAT', 'PHYS', 'ENGL', 'COM', 'ECON', 'PSY'}
-    completed_depts = {cn.split()[0] for cn in completed if cn.strip()}
-    focus_depts = {department} | CORE_DEPTS | completed_depts
+    if not interests:
+        return jsonify([])
 
     all_courses = _db.get_all_courses()
-    available = [c.course_number for c in all_courses if c.department in focus_depts]
 
-    print(f"AI recommend: dept={department}, focus_depts={focus_depts}, "
-          f"available courses={len(available)} (of {len(all_courses)} total)")
+    # ── Phase 1: keyword search across ALL 6 000+ courses ─────────────────────
+    # Score every course by how many query keywords appear in its title (3×)
+    # and description (1×).  Returns the top-40 most relevant candidates.
+    keyword_hits = _keyword_search(interests, all_courses, top_n=40)
 
-    recs = _llm.get_recommendations(interests, completed, department, available_courses=available)
-    return jsonify(recs)
+    # Also pull in courses from the student's own department so they always
+    # appear as candidates even when the query is very broad.
+    dept_courses = [c for c in all_courses if c.department == department]
+    seen         = {c.course_number for _, c in keyword_hits}
+    extra_dept   = [c for c in dept_courses if c.course_number not in seen]
+
+    candidates = [c for _, c in keyword_hits] + extra_dept[:15]
+
+    print(f"AI recommend: dept={department}, interests='{interests[:60]}', "
+          f"keyword_hits={len(keyword_hits)}, candidates={len(candidates)}")
+
+    # ── Phase 2: LLM re-ranks candidates using titles + description previews ──
+    # The LLM sees each course's actual content, not just its code, so it can
+    # reason accurately and write meaningful one-sentence reasons.
+    if _llm.is_available():
+        recs = _llm.get_recommendations(interests, completed, department, candidates[:50])
+        if recs:
+            return jsonify(recs)
+
+    # ── Fallback: return keyword-scored results when Ollama is not running ─────
+    if not keyword_hits and not dept_courses:
+        return jsonify([])
+
+    fallback = keyword_hits if keyword_hits else [(0, c) for c in dept_courses[:10]]
+    out = []
+    for _score, course in fallback[:10]:
+        desc_preview = (course.description or '').strip()[:120]
+        reason = (desc_preview + '…') if desc_preview else f'A {course.department} course related to your query.'
+        out.append({'course': course.to_dict(), 'reason': reason, 'ai_ranked': False})
+    return jsonify(out)
+
+
+# ── Program plan scheduler ────────────────────────────────────────────────────
+
+def _collect_with_prereqs(seed_numbers: List[str], completed_set: set,
+                          db: 'Database', depth_limit: int = 3) -> Dict[str, Course]:
+    """Recursively expand a list of required course numbers to include their
+    unmet prerequisites (up to depth_limit levels deep).
+
+    Only adds prerequisites that exist in the DB and are not already completed.
+    Returns a dict of {course_number: Course} ready for scheduling.
+    """
+    result: Dict[str, Course] = {}
+    queue = list(seed_numbers)
+    depth: Dict[str, int] = {cn: 0 for cn in seed_numbers}
+
+    while queue:
+        cn = queue.pop(0)
+        if cn in result or cn in completed_set:
+            continue
+        course = db.get_course_by_number(cn)
+        if not course:
+            continue
+        result[cn] = course
+        if depth.get(cn, 0) < depth_limit:
+            for prereq in course.prerequisites:
+                if prereq not in result and prereq not in completed_set:
+                    depth[prereq] = depth.get(cn, 0) + 1
+                    queue.append(prereq)
+
+    return result
+
+
+def _schedule_courses(courses_dict: Dict[str, Course], completed_set: set,
+                      duration_years: int, max_credits: int = 15) -> tuple:
+    """Greedy semester scheduler that respects prerequisites.
+
+    - Iterates Fall/Spring semesters across duration_years.
+    - Each pass picks all "ready" courses (every prerequisite already completed
+      or placed in an earlier semester) up to max_credits.
+    - Returns (semesters, unscheduled_courses):
+        semesters          – list of {year, semester, courses, credits}
+        unscheduled_courses – list of Course objects that couldn't be placed
+    """
+    from collections import deque
+
+    scheduled = set(completed_set)
+    remaining = dict(courses_dict)
+
+    # Topological sort to detect obvious ordering (breaks ties in a sensible way)
+    in_degree: Dict[str, int] = {}
+    adj: Dict[str, List[str]] = {cn: [] for cn in remaining}
+    for cn, c in remaining.items():
+        effective_prereqs = [p for p in c.prerequisites if p in remaining]
+        in_degree[cn] = len(effective_prereqs)
+        for p in effective_prereqs:
+            adj.setdefault(p, []).append(cn)
+
+    topo_queue: deque = deque(cn for cn, d in in_degree.items() if d == 0)
+    topo_order: List[str] = []
+    while topo_queue:
+        cn = topo_queue.popleft()
+        topo_order.append(cn)
+        for dep in adj.get(cn, []):
+            in_degree[dep] -= 1
+            if in_degree[dep] == 0:
+                topo_queue.append(dep)
+    # Any courses left in a cycle get appended at end
+    topo_order += [cn for cn in remaining if cn not in set(topo_order)]
+    priority = {cn: i for i, cn in enumerate(topo_order)}
+
+    semesters: List[dict] = []
+    total_semesters = duration_years * 2   # fall + spring only
+
+    for sem_idx in range(total_semesters):
+        year     = (sem_idx // 2) + 1
+        semester = (sem_idx % 2) + 1     # 1 = Fall, 2 = Spring
+
+        # Courses whose prerequisites are all satisfied
+        ready = [
+            (cn, c) for cn, c in remaining.items()
+            if all(
+                p in scheduled
+                for p in c.prerequisites
+                if p in courses_dict     # only enforce internal prereqs
+            )
+        ]
+        # Sort: lowest topo index (earliest in dependency chain) first
+        ready.sort(key=lambda x: priority.get(x[0], 9999))
+
+        sem_courses: List[Course] = []
+        sem_credits = 0
+
+        for cn, course in ready:
+            if sem_credits + course.credits <= max_credits:
+                sem_courses.append(course)
+                sem_credits += course.credits
+                scheduled.add(cn)
+                remaining.pop(cn)
+
+        if sem_courses:
+            semesters.append({
+                'year':     year,
+                'semester': semester,
+                'courses':  sem_courses,
+                'credits':  sem_credits,
+            })
+
+    return semesters, list(remaining.values())
+
+
+@app.route('/api/ai/program-plan', methods=['POST'])
+def ai_program_plan():
+    body        = request.get_json(force=True)
+    interests   = (body.get('interests') or '').strip()
+    completed   = body.get('completed_courses', [])
+    department  = body.get('department', 'CS')
+    duration    = max(1, min(int(body.get('duration_years', 4)), 8))
+    max_credits = max(9, min(int(body.get('max_credits_per_semester', 15)), 22))
+    start_year  = int(body.get('start_year', 2025))
+
+    completed_set = set(completed)
+
+    # ── 1. Load requirements ──────────────────────────────────────────────────
+    dept_req  = _db.get_department_requirements(department)
+    univ_reqs = _db.get_university_requirements()
+
+    # ── 2. Collect required courses ───────────────────────────────────────────
+    dept_required_set = set(dept_req['required_courses']) if dept_req else set()
+    seed_numbers: List[str] = []
+
+    # Department required courses
+    for cn in dept_required_set:
+        if cn not in completed_set:
+            seed_numbers.append(cn)
+
+    # University requirements — pick one satisfying course per requirement
+    univ_course_map: Dict[int, str] = {}   # req_id → chosen course_number
+    for req in univ_reqs:
+        if req['courses_required']:
+            # Already satisfied by a completed course?
+            if any(cn in completed_set for cn in req['courses_required']):
+                continue
+            for cn in req['courses_required']:
+                c = _db.get_course_by_number(cn)
+                if c and cn not in completed_set:
+                    if cn not in seed_numbers:
+                        seed_numbers.append(cn)
+                    univ_course_map[req['id']] = cn
+                    break
+
+    univ_required_set = set(univ_course_map.values())
+
+    # Recursively pull in unmet prerequisites
+    courses_to_schedule = _collect_with_prereqs(seed_numbers, completed_set, _db)
+
+    print(f"Program plan: dept={department}, duration={duration}yr, "
+          f"required={len(seed_numbers)}, with_prereqs={len(courses_to_schedule)}, "
+          f"completed={len(completed_set)}")
+
+    # ── 3. Schedule required + prerequisite courses ───────────────────────────
+    semesters, unscheduled = _schedule_courses(
+        courses_to_schedule, completed_set, duration, max_credits
+    )
+
+    # ── 4. Fill remaining semester capacity with interest-based electives ─────
+    if interests:
+        all_courses = _db.get_all_courses()
+        excluded    = set(courses_to_schedule.keys()) | completed_set
+        elective_pool = [c for c in all_courses if c.course_number not in excluded]
+        elective_hits = _keyword_search(interests, elective_pool, top_n=30)
+        electives     = [c for _, c in elective_hits]
+        elective_idx  = 0
+
+        # First pass: fill existing semesters that have room
+        for sem in semesters:
+            while elective_idx < len(electives):
+                ec = electives[elective_idx]
+                if sem['credits'] + ec.credits <= max_credits:
+                    sem['courses'].append(ec)
+                    sem['credits'] += ec.credits
+                    excluded.add(ec.course_number)
+                    elective_idx += 1
+                else:
+                    break
+
+        # Second pass: open new semesters for remaining electives
+        total_placed = sum(1 for sem in semesters for _ in sem['courses'])
+        total_slots  = duration * 2
+        while elective_idx < len(electives) and len(semesters) < total_slots:
+            sem_idx  = len(semesters)
+            year     = (sem_idx // 2) + 1
+            semester = (sem_idx % 2) + 1
+            sem_courses = []
+            sem_credits = 0
+            while elective_idx < len(electives):
+                ec = electives[elective_idx]
+                if sem_credits + ec.credits <= max_credits:
+                    sem_courses.append(ec)
+                    sem_credits += ec.credits
+                    elective_idx += 1
+                else:
+                    break
+            if sem_courses:
+                semesters.append({'year': year, 'semester': semester,
+                                   'courses': sem_courses, 'credits': sem_credits})
+
+    # ── 5. Build response ─────────────────────────────────────────────────────
+    SEMESTER_NAMES = {1: 'Fall', 2: 'Spring'}
+
+    result_semesters = []
+    for sem in semesters:
+        year     = sem['year']
+        semester = sem['semester']
+        cal_year = start_year + (year - 1) + (1 if semester == 2 else 0)
+
+        courses_out = []
+        for course in sem['courses']:
+            if course.course_number in dept_required_set:
+                ctype  = 'required'
+                reason = f'Required for the {department} degree'
+            elif course.course_number in univ_required_set:
+                ctype  = 'university'
+                reason = 'Satisfies a university graduation requirement'
+            elif course.course_number in courses_to_schedule:
+                ctype  = 'prereq'
+                reason = 'Prerequisite for a required course'
+            else:
+                ctype  = 'elective'
+                reason = 'Suggested elective based on your stated interests'
+            courses_out.append({**course.to_dict(), 'type': ctype, 'reason': reason})
+
+        result_semesters.append({
+            'year':     year,
+            'semester': semester,
+            'label':    f"{SEMESTER_NAMES.get(semester, '')} {cal_year}",
+            'courses':  courses_out,
+            'credits':  sem['credits'],
+        })
+
+    completed_credits = sum(
+        (c.credits if (c := _db.get_course_by_number(cn)) else 0)
+        for cn in completed_set
+    )
+
+    return jsonify({
+        'semesters':     result_semesters,
+        'unscheduled':   [c.to_dict() for c in unscheduled],
+        'total_credits': sum(s['credits'] for s in result_semesters) + completed_credits,
+        'dept_required': len(dept_required_set),
+        'univ_required': len(univ_required_set),
+    })
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────

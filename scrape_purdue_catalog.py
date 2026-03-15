@@ -220,26 +220,26 @@ def parse_course_detail(soup: BeautifulSoup, coid: int) -> Optional[Dict]:
     if not (MIN_COURSE_NUM <= num <= MAX_COURSE_NUM):
         return None
 
-    # Find the <p> that contains the h1 (the main content block)
-    content_p = next(
-        (p for p in soup.find_all('p') if p.find('h1', id='course_preview_title')),
-        None,
-    )
+    # The course detail lives in the <td> that is the closest ancestor of the h1.
+    # (Older scraper versions looked for a <p> wrapper, but the Purdue catalog
+    #  page wraps the content in a <td class="block_content"> table cell.)
+    content_block = h1.find_parent('td')
 
     # Credits
     credits = 3
-    if content_p:
-        m_cr = re.search(r'Credit Hours:\s*([\d.]+)', content_p.get_text())
+    if content_block:
+        m_cr = re.search(r'Credit Hours:\s*([\d]+(?:\.[\d]+)?)', content_block.get_text())
         if m_cr:
             credits = round(float(m_cr.group(1)))
 
-    # Description — text between "Credit Hours: X.XX." and the first <hr>
+    # Description — text between "Credit Hours: X.XX." and the closing </td>
+    # (or a legacy <hr> separator if it ever appears).
     description = ""
-    if content_p:
-        p_html = str(content_p)
+    if content_block:
+        block_html = str(content_block)
         m_desc = re.search(
-            r'Credit Hours:\s*[\d.]+\.\s*(.*?)<hr',
-            p_html,
+            r'Credit Hours:\s*[\d.]+\.?\s*(.*?)(?:<hr|</td)',
+            block_html,
             re.DOTALL | re.IGNORECASE,
         )
         if m_desc:
@@ -332,6 +332,32 @@ def _upsert_course(conn: sqlite3.Connection, course: Dict):
     conn.commit()
 
 
+def _update_description(conn: sqlite3.Connection, course_number: str,
+                        description: str, prerequisites: List[str],
+                        corequisites: List[str]):
+    """Update only the description / prereq / coreq fields for an existing course."""
+    conn.execute(
+        """UPDATE courses
+              SET description   = ?,
+                  prerequisites = ?,
+                  corequisites  = ?
+            WHERE course_number = ?""",
+        (description,
+         json.dumps(prerequisites),
+         json.dumps(corequisites),
+         course_number),
+    )
+    conn.commit()
+
+
+def _courses_needing_descriptions(conn: sqlite3.Connection) -> Set[str]:
+    """Return the set of course_numbers in the DB that have an empty description."""
+    rows = conn.execute(
+        "SELECT course_number FROM courses WHERE description IS NULL OR description = ''"
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -356,6 +382,11 @@ def main():
     parser.add_argument(
         "--no-cache", action="store_true",
         help="Re-scrape course detail pages even if already cached.",
+    )
+    parser.add_argument(
+        "--fill-descriptions", action="store_true",
+        help="Only re-fetch courses already in the DB that have an empty description. "
+             "Faster than --no-cache because it skips courses that already have descriptions.",
     )
     args = parser.parse_args()
 
@@ -392,12 +423,21 @@ def main():
     print(f"Found {len(unique_links)} unique qualifying course IDs.")
 
     # ── Phase 2: fetch detail pages ───────────────────────────────────────
-    to_fetch = [(coid, num, t) for coid, num, t in unique_links
-                if coid not in already_done]
-    cached_count = len(unique_links) - len(to_fetch)
-
-    print(f"\nPhase 2 — fetching {len(to_fetch)} detail pages "
-          f"(skipping {cached_count} cached)…\n")
+    if args.fill_descriptions:
+        # Only re-fetch courses already in the DB that have no description yet.
+        need_desc = _courses_needing_descriptions(conn)
+        to_fetch = [
+            (coid, num, t) for coid, num, t in unique_links
+            if num in need_desc
+        ]
+        print(f"\nPhase 2 (fill-descriptions) — {len(to_fetch)} courses need descriptions "
+              f"(of {len(unique_links)} found in catalog)…\n")
+    else:
+        to_fetch = [(coid, num, t) for coid, num, t in unique_links
+                    if coid not in already_done]
+        cached_count = len(unique_links) - len(to_fetch)
+        print(f"\nPhase 2 — fetching {len(to_fetch)} detail pages "
+              f"(skipping {cached_count} cached)…\n")
 
     scraped = skipped_invalid = errors = 0
 
@@ -421,7 +461,14 @@ def main():
             continue
 
         _ensure_department(conn, course['department'])
-        _upsert_course(conn, course)
+        if args.fill_descriptions:
+            # Only patch description / prereqs / coreqs — don't overwrite the full row
+            _update_description(conn, course['course_number'],
+                                course['description'],
+                                course['prerequisites'],
+                                course['corequisites'])
+        else:
+            _upsert_course(conn, course)
         scraped += 1
 
         prereq_info = (
