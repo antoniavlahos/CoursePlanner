@@ -136,6 +136,14 @@ function SemesterCard({
                   <span style={{ color: 'var(--green)', fontWeight: 600, marginLeft: 6 }}>✓ applied</span>
                 )}
               </div>
+              {course.type === 'elective' && course.reason && (
+                <div style={{
+                  fontSize: '.69rem', color: '#9ca3af',
+                  fontStyle: 'italic', lineHeight: 1.3, marginTop: 2,
+                }}>
+                  {course.reason}
+                </div>
+              )}
             </div>
 
             {/* Delete button */}
@@ -603,7 +611,18 @@ export default function AiPlanner() {
                     </div>
                   ))}
 
-                  <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                  <div style={{ marginLeft: 'auto', display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
+                    {/* AI / keyword badge */}
+                    <span style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 5,
+                      fontSize: '.75rem', fontWeight: 600, padding: '3px 10px',
+                      borderRadius: 20,
+                      background: programPlan.ai_ranked ? '#f0f4ff' : '#f0fdf4',
+                      color:      programPlan.ai_ranked ? '#3730a3' : '#166534',
+                      border:     `1px solid ${programPlan.ai_ranked ? '#c7d2fe' : '#bbf7d0'}`,
+                    }}>
+                      {programPlan.ai_ranked ? '🤖 AI Planned' : '🔍 Keyword Match'}
+                    </span>
                     {/* Legend */}
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                       {Object.entries(TYPE_BADGE).map(([key, t]) => (

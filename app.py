@@ -758,13 +758,42 @@ def ai_program_plan():
     )
 
     # ── 4. Fill remaining semester capacity with interest-based electives ─────
+    ai_elective_reasons: Dict[str, str] = {}   # course_number → Ollama reason
+    ai_ranked_plan = False
+
     if interests:
-        all_courses = _db.get_all_courses()
-        excluded    = set(courses_to_schedule.keys()) | completed_set
+        all_courses   = _db.get_all_courses()
+        excluded      = set(courses_to_schedule.keys()) | completed_set
         elective_pool = [c for c in all_courses if c.course_number not in excluded]
-        elective_hits = _keyword_search(interests, elective_pool, top_n=30)
-        electives     = [c for _, c in elective_hits]
-        elective_idx  = 0
+        elective_hits = _keyword_search(interests, elective_pool, top_n=40)
+
+        electives: List[Course] = []
+
+        # Phase 1: try Ollama for AI-ranked elective selection
+        if _llm.is_available() and elective_hits:
+            candidates = [c for _, c in elective_hits]
+            ai_recs    = _llm.get_recommendations(interests, completed, department, candidates)
+            if ai_recs:
+                ai_ranked_plan      = True
+                ai_elective_reasons = {
+                    rec['course']['course_number']: rec['reason'] for rec in ai_recs
+                }
+                # AI-selected courses first (in Ollama rank order), then keyword remainder
+                ai_cns   = {rec['course']['course_number'] for rec in ai_recs}
+                ai_rank  = {rec['course']['course_number']: i for i, rec in enumerate(ai_recs)}
+                ai_first = sorted(
+                    [c for _, c in elective_hits if c.course_number in ai_cns],
+                    key=lambda c: ai_rank.get(c.course_number, 999),
+                )
+                rest     = [c for _, c in elective_hits if c.course_number not in ai_cns]
+                electives = ai_first + rest
+                print(f"Ollama selected {len(ai_first)} electives for program plan")
+
+        # Phase 2: fallback to keyword order when Ollama is unavailable / returned nothing
+        if not electives:
+            electives = [c for _, c in elective_hits]
+
+        elective_idx = 0
 
         # First pass: fill existing semesters that have room
         for sem in semesters:
@@ -779,12 +808,11 @@ def ai_program_plan():
                     break
 
         # Second pass: open new semesters for remaining electives
-        total_placed = sum(1 for sem in semesters for _ in sem['courses'])
-        total_slots  = duration * 2
+        total_slots = duration * 2
         while elective_idx < len(electives) and len(semesters) < total_slots:
-            sem_idx  = len(semesters)
-            year     = (sem_idx // 2) + 1
-            semester = (sem_idx % 2) + 1
+            sem_idx     = len(semesters)
+            year        = (sem_idx // 2) + 1
+            semester    = (sem_idx % 2) + 1
             sem_courses = []
             sem_credits = 0
             while elective_idx < len(electives):
@@ -821,7 +849,10 @@ def ai_program_plan():
                 reason = 'Prerequisite for a required course'
             else:
                 ctype  = 'elective'
-                reason = 'Suggested elective based on your stated interests'
+                reason = ai_elective_reasons.get(
+                    course.course_number,
+                    'Suggested elective based on your stated interests',
+                )
             courses_out.append({**course.to_dict(), 'type': ctype, 'reason': reason})
 
         result_semesters.append({
@@ -843,6 +874,7 @@ def ai_program_plan():
         'total_credits': sum(s['credits'] for s in result_semesters) + completed_credits,
         'dept_required': len(dept_required_set),
         'univ_required': len(univ_required_set),
+        'ai_ranked':     ai_ranked_plan,
     })
 
 

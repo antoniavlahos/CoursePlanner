@@ -17,6 +17,38 @@ const STATUS_LABEL = {
   completed:   'Completed',
 }
 
+// ── GPA helpers ───────────────────────────────────────────────────────────────
+const GRADE_POINTS = {
+  'A+': 4.0, 'A': 4.0, 'A-': 3.7,
+  'B+': 3.3, 'B': 3.0, 'B-': 2.7,
+  'C+': 2.3, 'C': 2.0, 'C-': 1.7,
+  'D+': 1.3, 'D': 1.0, 'D-': 0.7,
+  'F': 0.0,
+}
+
+function gradePoints(grade) {
+  if (!grade) return null
+  return GRADE_POINTS[grade.trim().toUpperCase()] ?? null  // S/U/W not counted
+}
+
+function calcGPA(items) {  // [{credits, grade}]
+  let totalPts = 0, totalCr = 0
+  for (const { credits, grade } of items) {
+    const pts = gradePoints(grade)
+    if (pts !== null) { totalPts += pts * credits; totalCr += credits }
+  }
+  return totalCr > 0 ? (totalPts / totalCr).toFixed(2) : null
+}
+
+function gpaColor(gpa) {
+  if (gpa === null) return 'var(--muted)'
+  const n = parseFloat(gpa)
+  if (n >= 3.5) return '#22c55e'
+  if (n >= 3.0) return '#84cc16'
+  if (n >= 2.0) return '#f59e0b'
+  return '#ef4444'
+}
+
 function toRelYear(yearVal, plan) {
   if (!plan) return yearVal
   if (yearVal > plan.duration_years) {
@@ -56,7 +88,7 @@ function GradeModal({ onConfirm, onCancel }) {
 
 // ── Plan semester card ────────────────────────────────────────────────────────
 function PlanSemesterCard({
-  label, courses,
+  label, courses, semGpa, cumGpa,
   onToggle, onRemove, onViewDetails,
   isDragOver,
   onDragOver, onDrop, onDragLeave, onDragStart,
@@ -81,14 +113,34 @@ function PlanSemesterCard({
         background: 'var(--blue)', color: '#fff',
         padding: '8px 14px',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        flexWrap: 'wrap', gap: 6,
       }}>
         <span style={{ fontWeight: 700, fontSize: '.92rem' }}>{label}</span>
-        <span style={{
-          background: 'rgba(207,185,145,.25)', color: '#CFB991',
-          borderRadius: 20, padding: '1px 9px', fontSize: '.75rem', fontWeight: 600,
-        }}>
-          {totalCredits} cr
-        </span>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{
+            background: 'rgba(207,185,145,.25)', color: '#CFB991',
+            borderRadius: 20, padding: '1px 9px', fontSize: '.75rem', fontWeight: 600,
+          }}>
+            {totalCredits} cr
+          </span>
+          {semGpa !== null && semGpa !== undefined && (
+            <span style={{
+              background: 'rgba(255,255,255,.18)', color: '#fff',
+              borderRadius: 20, padding: '1px 9px', fontSize: '.75rem', fontWeight: 600,
+            }}>
+              Sem {semGpa}
+            </span>
+          )}
+          {cumGpa !== null && cumGpa !== undefined && (
+            <span style={{
+              background: 'rgba(207,185,145,.45)', color: '#fff',
+              borderRadius: 20, padding: '1px 9px', fontSize: '.75rem', fontWeight: 700,
+              letterSpacing: '.2px',
+            }}>
+              Cum {cumGpa}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Course rows */}
@@ -339,6 +391,33 @@ export default function MyPlan() {
   const hasSummer = planCourses.some((pc) => pc.semester === 3)
   const semesterTypes = hasSummer ? [1, 2, 3] : [1, 2]
 
+  // ── GPA per semester ───────────────────────────────────────────────────────
+  // Walk semesters chronologically, accumulating completed+graded courses to
+  // produce both a per-semester GPA and a running cumulative GPA.
+  const cumulativeAccum = []
+  const semGpaMap  = {}   // "yr-sem" → semester GPA string | null
+  const cumGpaMap  = {}   // "yr-sem" → cumulative GPA string | null
+
+  for (let yr = 1; yr <= duration; yr++) {
+    for (const sem of semesterTypes) {
+      const key     = `${yr}-${sem}`
+      const courses = slotMap[key] || []
+      const semItems = courses
+        .filter((pc) => pc.status === 'completed')
+        .map((pc) => ({ credits: pc.course.credits, grade: pc.grade }))
+      semGpaMap[key] = calcGPA(semItems)
+      cumulativeAccum.push(...semItems)
+      cumGpaMap[key] = calcGPA(cumulativeAccum)
+    }
+  }
+
+  // Overall cumulative GPA (all completed courses)
+  const overallGpa = calcGPA(
+    planCourses
+      .filter((pc) => pc.status === 'completed')
+      .map((pc) => ({ credits: pc.course.credits, grade: pc.grade }))
+  )
+
   // Semester label helper
   function semLabel(year, semester) {
     const calYear = startYear + (year - 1) + (semester === 2 ? 1 : 0)
@@ -374,6 +453,12 @@ export default function MyPlan() {
             <div className="label">Credits Completed</div>
             <div className="value" style={{ color: 'var(--green)' }}>{completedCredits}</div>
           </div>
+          {overallGpa !== null && (
+            <div>
+              <div className="label">Cumulative GPA</div>
+              <div className="value" style={{ color: gpaColor(overallGpa) }}>{overallGpa}</div>
+            </div>
+          )}
         </div>
       )}
 
@@ -434,6 +519,8 @@ export default function MyPlan() {
                     key={key}
                     label={semLabel(yr, sem)}
                     courses={courses}
+                    semGpa={semGpaMap[key]}
+                    cumGpa={cumGpaMap[key]}
                     onToggle={handleToggle}
                     onRemove={handleRemove}
                     onViewDetails={setDrawerCourse}
