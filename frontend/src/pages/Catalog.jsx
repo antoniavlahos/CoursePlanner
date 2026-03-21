@@ -12,6 +12,10 @@ function AddModal({ course, plan, onClose, onAdded }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  const offeredTerms = course.terms_offered ?? []
+  const semName = TERMS[semester]
+  const notOffered = offeredTerms.length > 0 && !offeredTerms.includes(semName)
+
   async function handleAdd() {
     setLoading(true)
     setError('')
@@ -73,6 +77,17 @@ function AddModal({ course, plan, onClose, onAdded }) {
             ))}
           </div>
         </div>
+
+        {notOffered && (
+          <div style={{
+            background: '#fffbea', color: '#92400e',
+            border: '1px solid #fcd34d', borderRadius: 8,
+            padding: '8px 12px', marginBottom: 8, fontSize: '.82rem',
+          }}>
+            ⚠️ <strong>{course.course_number}</strong> is typically offered in{' '}
+            {offeredTerms.join(' & ')} only. You can still add it.
+          </div>
+        )}
 
         {error && <div className="error-msg">{error}</div>}
 

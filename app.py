@@ -10,16 +10,23 @@ import sqlite3
 import json
 import urllib.request
 import urllib.error
-from datetime import datetime
+import os
+from datetime import datetime, timedelta, timezone
+from functools import wraps
 from typing import Optional, List, Dict
 
 try:
-    from flask import Flask, request, jsonify
+    from flask import Flask, request, jsonify, g
     from flask_cors import CORS
+    from werkzeug.security import generate_password_hash, check_password_hash
+    import jwt
 except ImportError as e:
     print(f"Missing dependency: {e}")
-    print("Install with: pip install flask flask-cors")
+    print("Install with: pip install flask flask-cors PyJWT")
     sys.exit(1)
+
+JWT_SECRET = os.environ.get('JWT_SECRET', 'dev-secret-change-in-production!')
+JWT_EXP_DAYS = 30
 
 DB_PATH = "purdue_courses.db"
 
@@ -82,6 +89,7 @@ class Database:
     def __init__(self, db_path: str = DB_PATH):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self._migrate()
 
     def get_all_courses(self) -> List[Course]:
         cursor = self.conn.cursor()
@@ -156,12 +164,13 @@ class Database:
             for r in cursor.fetchall()
         ]
 
-    def create_plan(self, name: str, duration_years: int, start_year: int, department: str) -> int:
+    def create_plan(self, name: str, duration_years: int, start_year: int,
+                    department: str, user_id: Optional[int] = None) -> int:
         cursor = self.conn.cursor()
         now = datetime.now().isoformat()
         cursor.execute(
-            "INSERT INTO plans (name, duration_years, start_year, department, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-            (name, duration_years, start_year, department, now, now),
+            "INSERT INTO plans (name, duration_years, start_year, department, created_at, updated_at, user_id) VALUES (?,?,?,?,?,?,?)",
+            (name, duration_years, start_year, department, now, now, user_id),
         )
         self.conn.commit()
         return cursor.lastrowid
@@ -172,9 +181,12 @@ class Database:
         row = cursor.fetchone()
         return dict(row) if row else None
 
-    def get_all_plans(self) -> List[dict]:
+    def get_all_plans(self, user_id: Optional[int] = None) -> List[dict]:
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM plans ORDER BY created_at DESC")
+        if user_id is not None:
+            cursor.execute("SELECT * FROM plans WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
+        else:
+            cursor.execute("SELECT * FROM plans ORDER BY created_at DESC")
         return [dict(r) for r in cursor.fetchall()]
 
     def delete_plan(self, plan_id: int):
@@ -261,6 +273,44 @@ class Database:
             terms_offered=json.loads(row['terms_offered']) if row['terms_offered'] else [],
             is_required=is_req,
         )
+
+    def _migrate(self):
+        """Run lightweight schema migrations (idempotent)."""
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                email        TEXT    UNIQUE NOT NULL,
+                password_hash TEXT   NOT NULL,
+                created_at   TEXT    NOT NULL
+            )
+        """)
+        # Add user_id column to plans if it doesn't exist yet
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(plans)")}
+        if 'user_id' not in cols:
+            self.conn.execute("ALTER TABLE plans ADD COLUMN user_id INTEGER REFERENCES users(id)")
+        self.conn.commit()
+
+    def create_user(self, email: str, password_hash: str) -> int:
+        now = datetime.now().isoformat()
+        cursor = self.conn.execute(
+            "INSERT INTO users (email, password_hash, created_at) VALUES (?,?,?)",
+            (email.lower().strip(), password_hash, now),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_user_by_email(self, email: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT id, email, password_hash FROM users WHERE email = ?",
+            (email.lower().strip(),),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_user_by_id(self, user_id: int) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT id, email FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        return dict(row) if row else None
 
     def close(self):
         self.conn.close()
@@ -416,6 +466,78 @@ _db = Database()
 _llm = LLMCoursePlanner()
 
 
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+
+def _make_token(user_id: int, email: str) -> str:
+    import time
+    payload = {
+        'sub': str(user_id),
+        'email': email,
+        'exp': int(time.time()) + JWT_EXP_DAYS * 24 * 3600,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
+
+
+def require_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.headers.get('Authorization', '')
+        if not auth.startswith('Bearer '):
+            return jsonify({'error': 'Unauthorized'}), 401
+        token = auth[7:].strip()
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+            g.user_id = int(payload['sub'])
+            g.user_email = payload['email']
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': 'Token expired'}), 401
+        except jwt.InvalidTokenError as e:
+            print(f"[AUTH] Invalid token ({type(e).__name__}): {e}")
+            return jsonify({'error': 'Invalid token'}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ── Auth routes ───────────────────────────────────────────────────────────────
+
+@app.route('/api/auth/register', methods=['POST'])
+def auth_register():
+    body = request.get_json(force=True)
+    email = (body.get('email') or '').strip().lower()
+    password = body.get('password') or ''
+    if not email or not password:
+        return jsonify({'error': 'Email and password are required'}), 400
+    if len(password) < 6:
+        return jsonify({'error': 'Password must be at least 6 characters'}), 400
+    if _db.get_user_by_email(email):
+        return jsonify({'error': 'Email already registered'}), 409
+    password_hash = generate_password_hash(password)
+    user_id = _db.create_user(email, password_hash)
+    token = _make_token(user_id, email)
+    return jsonify({'token': token, 'user': {'id': user_id, 'email': email}}), 201
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def auth_login():
+    body = request.get_json(force=True)
+    email = (body.get('email') or '').strip().lower()
+    password = body.get('password') or ''
+    user = _db.get_user_by_email(email)
+    if not user or not check_password_hash(user['password_hash'], password):
+        return jsonify({'error': 'Invalid email or password'}), 401
+    token = _make_token(user['id'], user['email'])
+    return jsonify({'token': token, 'user': {'id': user['id'], 'email': user['email']}})
+
+
+@app.route('/api/auth/me')
+@require_auth
+def auth_me():
+    user = _db.get_user_by_id(g.user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    return jsonify(user)
+
+
 # ── Courses ───────────────────────────────────────────────────────────────────
 
 @app.route('/api/courses')
@@ -462,11 +584,13 @@ def university_requirements():
 # ── Plans ─────────────────────────────────────────────────────────────────────
 
 @app.route('/api/plans', methods=['GET'])
+@require_auth
 def list_plans():
-    return jsonify(_db.get_all_plans())
+    return jsonify(_db.get_all_plans(user_id=g.user_id))
 
 
 @app.route('/api/plans', methods=['POST'])
+@require_auth
 def create_plan():
     body = request.get_json(force=True)
     name = body.get('name', '').strip()
@@ -477,20 +601,28 @@ def create_plan():
         duration_years=int(body.get('duration_years', 4)),
         start_year=int(body.get('start_year', datetime.now().year)),
         department=body.get('department', 'CS'),
+        user_id=g.user_id,
     )
     return jsonify(_db.get_plan(plan_id)), 201
 
 
 @app.route('/api/plans/<int:plan_id>', methods=['GET'])
+@require_auth
 def get_plan(plan_id):
     plan = _db.get_plan(plan_id)
     if not plan:
         return jsonify({'error': 'Not found'}), 404
+    if plan.get('user_id') != g.user_id:
+        return jsonify({'error': 'Forbidden'}), 403
     return jsonify(plan)
 
 
 @app.route('/api/plans/<int:plan_id>', methods=['DELETE'])
+@require_auth
 def delete_plan(plan_id):
+    plan = _db.get_plan(plan_id)
+    if plan and plan.get('user_id') != g.user_id:
+        return jsonify({'error': 'Forbidden'}), 403
     _db.delete_plan(plan_id)
     return jsonify({'ok': True})
 
