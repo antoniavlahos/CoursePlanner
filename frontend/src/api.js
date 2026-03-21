@@ -11,10 +11,6 @@ async function req(path, options = {}) {
   const res = await fetch(BASE + path, { headers, ...options })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }))
-    if (res.status === 401) {
-      localStorage.removeItem('authToken')
-      window.dispatchEvent(new Event('auth:logout'))
-    }
     throw new Error(err.error || `HTTP ${res.status}`)
   }
   return res.json()

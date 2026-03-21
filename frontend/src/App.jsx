@@ -136,10 +136,6 @@ export default function App() {
     setAuth(null)
   }
 
-  useEffect(() => {
-    window.addEventListener('auth:logout', logout)
-    return () => window.removeEventListener('auth:logout', logout)
-  }, [])
 
   if (loading) {
     return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#F0F2F5' }}>Loading…</div>
