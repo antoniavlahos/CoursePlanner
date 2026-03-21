@@ -1,16 +1,29 @@
 const BASE = '/api'
 
+function getToken() {
+  return localStorage.getItem('authToken')
+}
+
 async function req(path, options = {}) {
-  const res = await fetch(BASE + path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  })
+  const token = getToken()
+  const headers = { 'Content-Type': 'application/json' }
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(BASE + path, { headers, ...options })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(err.error || `HTTP ${res.status}`)
   }
   return res.json()
 }
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+export const register = (email, password) =>
+  req('/auth/register', { method: 'POST', body: JSON.stringify({ email, password }) })
+
+export const login = (email, password) =>
+  req('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
+
+export const getMe = () => req('/auth/me')
 
 // ── Courses ───────────────────────────────────────────────────────────────────
 export const getCourses = (q = '', dept = '') =>
