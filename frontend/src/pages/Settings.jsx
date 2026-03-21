@@ -77,10 +77,15 @@ export default function Settings() {
   const [showCreate, setShowCreate] = useState(false)
   const [loading, setLoading] = useState(true)
 
+  useEffect(() => {
+    getDepartments().then(setDepartments).catch(() => {})
+  }, [])
+
   const reload = () => {
     setLoading(true)
-    Promise.all([getPlans(), getDepartments()])
-      .then(([p, d]) => { setPlans(p); setDepartments(d) })
+    getPlans()
+      .then(setPlans)
+      .catch(() => {})
       .finally(() => setLoading(false))
   }
   useEffect(reload, [])
