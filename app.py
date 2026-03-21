@@ -25,7 +25,7 @@ except ImportError as e:
     print("Install with: pip install flask flask-cors PyJWT")
     sys.exit(1)
 
-JWT_SECRET = os.environ.get('JWT_SECRET', 'dev-secret-change-in-production')
+JWT_SECRET = os.environ.get('JWT_SECRET', 'dev-secret-change-in-production!')
 JWT_EXP_DAYS = 30
 
 DB_PATH = "purdue_courses.db"
@@ -469,10 +469,11 @@ _llm = LLMCoursePlanner()
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 
 def _make_token(user_id: int, email: str) -> str:
+    import time
     payload = {
-        'sub': user_id,
+        'sub': str(user_id),
         'email': email,
-        'exp': datetime.now(tz=timezone.utc) + timedelta(days=JWT_EXP_DAYS),
+        'exp': int(time.time()) + JWT_EXP_DAYS * 24 * 3600,
     }
     return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
 
@@ -483,14 +484,15 @@ def require_auth(f):
         auth = request.headers.get('Authorization', '')
         if not auth.startswith('Bearer '):
             return jsonify({'error': 'Unauthorized'}), 401
-        token = auth[7:]
+        token = auth[7:].strip()
         try:
             payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
-            g.user_id = payload['sub']
+            g.user_id = int(payload['sub'])
             g.user_email = payload['email']
         except jwt.ExpiredSignatureError:
             return jsonify({'error': 'Token expired'}), 401
-        except jwt.InvalidTokenError:
+        except jwt.InvalidTokenError as e:
+            print(f"[AUTH] Invalid token ({type(e).__name__}): {e}")
             return jsonify({'error': 'Invalid token'}), 401
         return f(*args, **kwargs)
     return decorated
