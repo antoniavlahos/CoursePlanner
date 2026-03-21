@@ -11,7 +11,13 @@ async function req(path, options = {}) {
   const res = await fetch(BASE + path, { headers, ...options })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(err.error || `HTTP ${res.status}`)
+    const message = err.error || `HTTP ${res.status}`
+    // On 401, clear stale token so the app redirects to login
+    if (res.status === 401) {
+      localStorage.removeItem('authToken')
+      window.location.href = '/login'
+    }
+    throw new Error(message)
   }
   return res.json()
 }
