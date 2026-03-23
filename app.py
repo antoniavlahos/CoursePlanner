@@ -502,31 +502,41 @@ def require_auth(f):
 
 @app.route('/api/auth/register', methods=['POST'])
 def auth_register():
-    body = request.get_json(force=True)
-    email = (body.get('email') or '').strip().lower()
-    password = body.get('password') or ''
-    if not email or not password:
-        return jsonify({'error': 'Email and password are required'}), 400
-    if len(password) < 6:
-        return jsonify({'error': 'Password must be at least 6 characters'}), 400
-    if _db.get_user_by_email(email):
-        return jsonify({'error': 'Email already registered'}), 409
-    password_hash = generate_password_hash(password)
-    user_id = _db.create_user(email, password_hash)
-    token = _make_token(user_id, email)
-    return jsonify({'token': token, 'user': {'id': user_id, 'email': email}}), 201
+    try:
+        body = request.get_json(force=True) or {}
+        email = (body.get('email') or '').strip().lower()
+        password = body.get('password') or ''
+        if not email or not password:
+            return jsonify({'error': 'Email and password are required'}), 400
+        if len(password) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters'}), 400
+        if _db.get_user_by_email(email):
+            return jsonify({'error': 'Email already registered'}), 409
+        password_hash = generate_password_hash(password)
+        user_id = _db.create_user(email, password_hash)
+        token = _make_token(user_id, email)
+        return jsonify({'token': token, 'user': {'id': user_id, 'email': email}}), 201
+    except Exception as e:
+        import traceback
+        print(f"[REGISTER ERROR] {e}\n{traceback.format_exc()}")
+        return jsonify({'error': f'Registration failed: {e}'}), 500
 
 
 @app.route('/api/auth/login', methods=['POST'])
 def auth_login():
-    body = request.get_json(force=True)
-    email = (body.get('email') or '').strip().lower()
-    password = body.get('password') or ''
-    user = _db.get_user_by_email(email)
-    if not user or not check_password_hash(user['password_hash'], password):
-        return jsonify({'error': 'Invalid email or password'}), 401
-    token = _make_token(user['id'], user['email'])
-    return jsonify({'token': token, 'user': {'id': user['id'], 'email': user['email']}})
+    try:
+        body = request.get_json(force=True) or {}
+        email = (body.get('email') or '').strip().lower()
+        password = body.get('password') or ''
+        user = _db.get_user_by_email(email)
+        if not user or not check_password_hash(user['password_hash'], password):
+            return jsonify({'error': 'Invalid email or password'}), 401
+        token = _make_token(user['id'], user['email'])
+        return jsonify({'token': token, 'user': {'id': user['id'], 'email': user['email']}})
+    except Exception as e:
+        import traceback
+        print(f"[LOGIN ERROR] {e}\n{traceback.format_exc()}")
+        return jsonify({'error': f'Login failed: {e}'}), 500
 
 
 @app.route('/api/auth/me')
