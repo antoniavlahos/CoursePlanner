@@ -6,22 +6,28 @@ import { register } from '../api.js'
 export default function Register() {
   const { setAuth } = useAuth()
   const navigate = useNavigate()
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [confirm, setConfirm] = useState('')
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [firstName, setFirstName] = useState('')
+  const [lastName, setLastName]   = useState('')
+  const [email, setEmail]         = useState('')
+  const [password, setPassword]   = useState('')
+  const [confirm, setConfirm]     = useState('')
+  const [error, setError]         = useState('')
+  const [loading, setLoading]     = useState(false)
 
   async function handleSubmit(e) {
     e.preventDefault()
     setError('')
+    if (!firstName.trim() || !lastName.trim()) {
+      setError('First name and last name are required')
+      return
+    }
     if (password !== confirm) {
       setError('Passwords do not match')
       return
     }
     setLoading(true)
     try {
-      const data = await register(email, password)
+      const data = await register(email, password, firstName.trim(), lastName.trim())
       localStorage.setItem('authToken', data.token)
       setAuth({ user: data.user, token: data.token })
       navigate('/catalog', { replace: true })
@@ -41,6 +47,29 @@ export default function Register() {
         </div>
         <h2 className="auth-title">Create account</h2>
         <form onSubmit={handleSubmit} className="auth-form">
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <label>
+              First name
+              <input
+                type="text"
+                value={firstName}
+                onChange={e => setFirstName(e.target.value)}
+                placeholder="Jane"
+                required
+                autoFocus
+              />
+            </label>
+            <label>
+              Last name
+              <input
+                type="text"
+                value={lastName}
+                onChange={e => setLastName(e.target.value)}
+                placeholder="Doe"
+                required
+              />
+            </label>
+          </div>
           <label>
             Email
             <input
@@ -49,7 +78,6 @@ export default function Register() {
               onChange={e => setEmail(e.target.value)}
               placeholder="you@purdue.edu"
               required
-              autoFocus
             />
           </label>
           <label>

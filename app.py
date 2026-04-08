@@ -1,7 +1,7 @@
 """
 Purdue Course Planner – Flask REST API Backend
 Run: python app.py
-API:  http://127.0.0.1:5000/api/
+API:  http://127.0.0.1:5050/api/
 """
 
 import re
@@ -11,6 +11,7 @@ import json
 import urllib.request
 import urllib.error
 import os
+import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Optional, List, Dict
@@ -87,6 +88,8 @@ class PlanCourse:
 
 class Database:
     def __init__(self, db_path: str = DB_PATH):
+        import threading
+        self._lock = threading.Lock()
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._migrate()
@@ -165,15 +168,17 @@ class Database:
         ]
 
     def create_plan(self, name: str, duration_years: int, start_year: int,
-                    department: str, user_id: Optional[int] = None) -> int:
-        cursor = self.conn.cursor()
-        now = datetime.now().isoformat()
-        cursor.execute(
-            "INSERT INTO plans (name, duration_years, start_year, department, created_at, updated_at, user_id) VALUES (?,?,?,?,?,?,?)",
-            (name, duration_years, start_year, department, now, now, user_id),
-        )
-        self.conn.commit()
-        return cursor.lastrowid
+                    department: str, user_id: Optional[int] = None,
+                    plan_type: str = 'single', secondary_department: str = '') -> int:
+        with self._lock:
+            cursor = self.conn.cursor()
+            now = datetime.now().isoformat()
+            cursor.execute(
+                "INSERT INTO plans (name, duration_years, start_year, department, created_at, updated_at, user_id, plan_type, secondary_department) VALUES (?,?,?,?,?,?,?,?,?)",
+                (name, duration_years, start_year, department, now, now, user_id, plan_type, secondary_department),
+            )
+            self.conn.commit()
+            return cursor.lastrowid
 
     def get_plan(self, plan_id: int) -> Optional[dict]:
         cursor = self.conn.cursor()
@@ -190,33 +195,37 @@ class Database:
         return [dict(r) for r in cursor.fetchall()]
 
     def delete_plan(self, plan_id: int):
-        cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM plan_courses WHERE plan_id = ?", (plan_id,))
-        cursor.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
-        self.conn.commit()
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("DELETE FROM plan_courses WHERE plan_id = ?", (plan_id,))
+            cursor.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
+            self.conn.commit()
 
     def add_course_to_plan(self, plan_id: int, course_id: int, semester: int,
                            year: int, semester_type: str = "regular") -> int:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "INSERT INTO plan_courses (plan_id, course_id, semester, year, semester_type, status) VALUES (?,?,?,?,?,'planned')",
-            (plan_id, course_id, semester, year, semester_type),
-        )
-        self.conn.commit()
-        return cursor.lastrowid
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "INSERT INTO plan_courses (plan_id, course_id, semester, year, semester_type, status) VALUES (?,?,?,?,?,'planned')",
+                (plan_id, course_id, semester, year, semester_type),
+            )
+            self.conn.commit()
+            return cursor.lastrowid
 
     def remove_course_from_plan(self, plan_course_id: int):
-        cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM plan_courses WHERE id = ?", (plan_course_id,))
-        self.conn.commit()
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("DELETE FROM plan_courses WHERE id = ?", (plan_course_id,))
+            self.conn.commit()
 
     def update_course_status(self, plan_course_id: int, status: str, grade: Optional[str] = None):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "UPDATE plan_courses SET status = ?, grade = ? WHERE id = ?",
-            (status, grade, plan_course_id),
-        )
-        self.conn.commit()
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "UPDATE plan_courses SET status = ?, grade = ? WHERE id = ?",
+                (status, grade, plan_course_id),
+            )
+            self.conn.commit()
 
     def update_plan_course_slot(self, plan_course_id: int,
                                 year: Optional[int] = None,
@@ -229,27 +238,30 @@ class Database:
             fields.append('semester = ?'); vals.append(semester)
         if fields:
             vals.append(plan_course_id)
-            self.conn.execute(
-                f"UPDATE plan_courses SET {', '.join(fields)} WHERE id = ?", vals
-            )
-            self.conn.commit()
+            with self._lock:
+                self.conn.execute(
+                    f"UPDATE plan_courses SET {', '.join(fields)} WHERE id = ?", vals
+                )
+                self.conn.commit()
 
     def get_plan_courses(self, plan_id: int) -> List[PlanCourse]:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """
-            SELECT pc.id, pc.semester, pc.year, pc.status, pc.grade, pc.semester_type,
-                   c.id, c.course_number, c.title, c.description, c.credits,
-                   c.department, c.prerequisites, c.corequisites, c.terms_offered
-            FROM plan_courses pc
-            JOIN courses c ON pc.course_id = c.id
-            WHERE pc.plan_id = ?
-            ORDER BY pc.year, pc.semester
-            """,
-            (plan_id,),
-        )
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                SELECT pc.id, pc.semester, pc.year, pc.status, pc.grade, pc.semester_type,
+                       c.id, c.course_number, c.title, c.description, c.credits,
+                       c.department, c.prerequisites, c.corequisites, c.terms_offered
+                FROM plan_courses pc
+                JOIN courses c ON pc.course_id = c.id
+                WHERE pc.plan_id = ?
+                ORDER BY pc.year, pc.semester
+                """,
+                (plan_id,),
+            )
+            rows = cursor.fetchall()
         results = []
-        for row in cursor.fetchall():
+        for row in rows:
             course = Course(
                 id=row[6], course_number=row[7], title=row[8],
                 description=row[9], credits=row[10], department=row[11],
@@ -288,29 +300,93 @@ class Database:
         cols = {row[1] for row in self.conn.execute("PRAGMA table_info(plans)")}
         if 'user_id' not in cols:
             self.conn.execute("ALTER TABLE plans ADD COLUMN user_id INTEGER REFERENCES users(id)")
+        # Add first_name / last_name to users if not present
+        user_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(users)")}
+        if 'first_name' not in user_cols:
+            self.conn.execute("ALTER TABLE users ADD COLUMN first_name TEXT NOT NULL DEFAULT ''")
+        if 'last_name' not in user_cols:
+            self.conn.execute("ALTER TABLE users ADD COLUMN last_name TEXT NOT NULL DEFAULT ''")
+        # Add share_token / plan_type / secondary_department to plans if not present
+        plan_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(plans)")}
+        if 'share_token' not in plan_cols:
+            self.conn.execute("ALTER TABLE plans ADD COLUMN share_token TEXT")
+            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_share_token ON plans (share_token)")
+        if 'plan_type' not in plan_cols:
+            self.conn.execute("ALTER TABLE plans ADD COLUMN plan_type TEXT NOT NULL DEFAULT 'single'")
+        if 'secondary_department' not in plan_cols:
+            self.conn.execute("ALTER TABLE plans ADD COLUMN secondary_department TEXT NOT NULL DEFAULT ''")
         self.conn.commit()
 
-    def create_user(self, email: str, password_hash: str) -> int:
-        now = datetime.now().isoformat()
-        cursor = self.conn.execute(
-            "INSERT INTO users (email, password_hash, created_at) VALUES (?,?,?)",
-            (email.lower().strip(), password_hash, now),
-        )
-        self.conn.commit()
-        return cursor.lastrowid
+    def create_user(self, email: str, password_hash: str,
+                    first_name: str = '', last_name: str = '') -> int:
+        with self._lock:
+            now = datetime.now().isoformat()
+            cursor = self.conn.execute(
+                "INSERT INTO users (email, password_hash, created_at, first_name, last_name) VALUES (?,?,?,?,?)",
+                (email.lower().strip(), password_hash, now, first_name.strip(), last_name.strip()),
+            )
+            self.conn.commit()
+            return cursor.lastrowid
 
     def get_user_by_email(self, email: str) -> Optional[dict]:
         row = self.conn.execute(
-            "SELECT id, email, password_hash FROM users WHERE email = ?",
+            "SELECT id, email, password_hash, first_name, last_name FROM users WHERE email = ?",
             (email.lower().strip(),),
         ).fetchone()
         return dict(row) if row else None
 
     def get_user_by_id(self, user_id: int) -> Optional[dict]:
         row = self.conn.execute(
-            "SELECT id, email FROM users WHERE id = ?", (user_id,)
+            "SELECT id, email, first_name, last_name FROM users WHERE id = ?", (user_id,)
         ).fetchone()
         return dict(row) if row else None
+
+    def update_plan(self, plan_id: int, name: str, duration_years: int, start_year: int,
+                    department: str, plan_type: str = 'single', secondary_department: str = ''):
+        with self._lock:
+            now = datetime.now().isoformat()
+            self.conn.execute(
+                """UPDATE plans
+                   SET name=?, duration_years=?, start_year=?, department=?,
+                       plan_type=?, secondary_department=?, updated_at=?
+                   WHERE id=?""",
+                (name, duration_years, start_year, department, plan_type, secondary_department, now, plan_id),
+            )
+            self.conn.commit()
+
+    def generate_share_token(self, plan_id: int) -> str:
+        import secrets
+        token = secrets.token_urlsafe(32)
+        with self._lock:
+            self.conn.execute("UPDATE plans SET share_token = ? WHERE id = ?", (token, plan_id))
+            self.conn.commit()
+        return token
+
+    def revoke_share_token(self, plan_id: int):
+        with self._lock:
+            self.conn.execute("UPDATE plans SET share_token = NULL WHERE id = ?", (plan_id,))
+            self.conn.commit()
+
+    def get_plan_by_share_token(self, token: str) -> Optional[dict]:
+        row = self.conn.execute(
+            """
+            SELECT p.id, p.name, p.duration_years, p.start_year, p.department, p.share_token,
+                   u.first_name, u.last_name, u.email
+            FROM plans p
+            LEFT JOIN users u ON p.user_id = u.id
+            WHERE p.share_token = ?
+            """,
+            (token,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_user(self, user_id: int, first_name: str, last_name: str):
+        with self._lock:
+            self.conn.execute(
+                "UPDATE users SET first_name = ?, last_name = ? WHERE id = ?",
+                (first_name.strip(), last_name.strip(), user_id),
+            )
+            self.conn.commit()
 
     def close(self):
         self.conn.close()
@@ -329,6 +405,40 @@ _STOP_WORDS = {
     'good', 'great', 'really', 'very', 'too', 'much', 'many', 'most', 'other',
     'new', 'use', 'used', 'using', 'need', 'needed', 'able', 'help', 'make',
 }
+
+
+# ── Year-level appropriateness ────────────────────────────────────────────────
+# Maps academic year → (min_course_level, max_course_level)
+# e.g. year 1 → only 100-299 level courses; year 4 → 300-599
+_YEAR_LEVEL_RANGE: Dict[int, tuple] = {
+    1: (100, 299),
+    2: (100, 399),
+    3: (200, 499),
+    4: (300, 599),
+    5: (400, 599),
+}
+
+def _course_level(course_number: str) -> int:
+    """Extract the numeric level from a course number (e.g. 'CS 301' → 301).
+
+    Purdue uses 5-digit course numbers (e.g. 'CS 18000').  Normalize those to
+    the equivalent 3-digit level so they compare correctly against
+    _YEAR_LEVEL_RANGE (18000 → 180, 25100 → 251, 30700 → 307, etc.).
+    """
+    m = re.search(r'\d+', course_number)
+    if not m:
+        return 0
+    level = int(m.group())
+    if level >= 10000:
+        level //= 100
+    elif level >= 1000:
+        level //= 10
+    return level
+
+def _level_ok(course_number: str, year: int) -> bool:
+    """Return True if the course's numeric level is appropriate for the given year."""
+    lo, hi = _YEAR_LEVEL_RANGE.get(year, _YEAR_LEVEL_RANGE[5])
+    return lo <= _course_level(course_number) <= hi
 
 
 def _keyword_search(query: str, courses: List[Course], top_n: int = 40) -> List[tuple]:
@@ -361,21 +471,29 @@ def _keyword_search(query: str, courses: List[Course], top_n: int = 40) -> List[
 class LLMCoursePlanner:
     def __init__(self):
         self.base_url = "http://localhost:11434"
-        self.model = "llama3.2"
-        self._check_model()
+        self.model = None
+        self._detect_model()
 
-    def _check_model(self):
+    def _detect_model(self):
+        """Pick the best available Ollama model.
+        Preference order: any qwen variant → first available model → None (unavailable)."""
         try:
             req = urllib.request.Request(f"{self.base_url}/api/tags")
             with urllib.request.urlopen(req, timeout=5) as response:
-                data = json.loads(response.read().decode('utf-8'))
-                models = data.get('models', [])
-                if models:
-                    self.model = models[0]['name']
+                data   = json.loads(response.read().decode('utf-8'))
+                models = [m['name'] for m in data.get('models', [])]
+                if not models:
+                    return
+                # Prefer any qwen variant, otherwise use the first model
+                qwen = next((m for m in models if 'qwen' in m.lower()), None)
+                self.model = qwen or models[0]
+                print(f"LLM: using model '{self.model}'")
         except Exception:
             pass
 
     def is_available(self) -> bool:
+        if not self.model:
+            return False
         try:
             req = urllib.request.Request(f"{self.base_url}/api/tags")
             urllib.request.urlopen(req, timeout=5)
@@ -394,7 +512,7 @@ class LLMCoursePlanner:
         # Build a compact catalogue block: course_number: title — description_preview
         course_lines = []
         for c in candidate_courses:
-            desc = (c.description or '').replace('\n', ' ')[:120].strip()
+            desc = (c.description or '').replace('\n', ' ')[:80].strip()
             if desc:
                 course_lines.append(f"{c.course_number}: {c.title} — {desc}")
             else:
@@ -415,43 +533,56 @@ class LLMCoursePlanner:
             '[{"course_number": "DEPT 00000", "reason": "one sentence explaining relevance"}, ...]'
         )
 
-        try:
+        LLM_TIMEOUT = 30   # wall-clock seconds; increase if your hardware is fast enough
+
+        def _do_llm_call():
             payload = json.dumps({"model": self.model, "prompt": prompt, "stream": False}).encode()
             req = urllib.request.Request(
                 f"{self.base_url}/api/generate",
                 data=payload,
                 headers={'Content-Type': 'application/json'},
             )
-            with urllib.request.urlopen(req, timeout=180) as response:
-                result = json.loads(response.read().decode())
-                text = result.get('response', '')
+            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as response:
+                return json.loads(response.read().decode())
 
-                # Ollama ≥0.17 surfaces reasoning in a separate 'thinking' field;
-                # strip legacy <think>…</think> tags just in case.
-                text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-                text = re.sub(r'```[a-z]*\n?', '', text)
-
-                start = text.find('[')
-                end   = text.rfind(']') + 1
-                if start == -1 or end <= start:
-                    print(f"LLM: no JSON array found in response: {text[:300]}")
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_do_llm_call)
+                try:
+                    result = future.result(timeout=LLM_TIMEOUT)
+                except concurrent.futures.TimeoutError:
+                    future.cancel()
+                    print(f"LLM timed out after {LLM_TIMEOUT}s — using keyword fallback")
                     return []
 
-                recs = json.loads(text[start:end])
-                db = Database()
-                out = []
-                for r in recs:
-                    c = db.get_course_by_number(r.get('course_number', '').strip())
-                    if c:
-                        out.append({
-                            'course': c.to_dict(),
-                            'reason': r.get('reason', ''),
-                            'ai_ranked': True,
-                        })
-                    else:
-                        print(f"LLM recommended unknown course: {r.get('course_number')}")
-                db.close()
-                return out
+            text = result.get('response', '')
+
+            # Ollama ≥0.17 surfaces reasoning in a separate 'thinking' field;
+            # strip legacy <think>…</think> tags just in case.
+            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+            text = re.sub(r'```[a-z]*\n?', '', text)
+
+            start = text.find('[')
+            end   = text.rfind(']') + 1
+            if start == -1 or end <= start:
+                print(f"LLM: no JSON array found in response: {text[:300]}")
+                return []
+
+            recs = json.loads(text[start:end])
+            db = Database()
+            out = []
+            for r in recs:
+                c = db.get_course_by_number(r.get('course_number', '').strip())
+                if c:
+                    out.append({
+                        'course': c.to_dict(),
+                        'reason': r.get('reason', ''),
+                        'ai_ranked': True,
+                    })
+                else:
+                    print(f"LLM recommended unknown course: {r.get('course_number')}")
+            db.close()
+            return out
 
         except Exception as e:
             print(f"LLM error: {e}")
@@ -503,18 +634,25 @@ def require_auth(f):
 @app.route('/api/auth/register', methods=['POST'])
 def auth_register():
     body = request.get_json(force=True)
-    email = (body.get('email') or '').strip().lower()
-    password = body.get('password') or ''
+    email      = (body.get('email')      or '').strip().lower()
+    password   = (body.get('password')   or '')
+    first_name = (body.get('first_name') or '').strip()
+    last_name  = (body.get('last_name')  or '').strip()
     if not email or not password:
         return jsonify({'error': 'Email and password are required'}), 400
+    if not first_name or not last_name:
+        return jsonify({'error': 'First name and last name are required'}), 400
     if len(password) < 6:
         return jsonify({'error': 'Password must be at least 6 characters'}), 400
     if _db.get_user_by_email(email):
         return jsonify({'error': 'Email already registered'}), 409
     password_hash = generate_password_hash(password)
-    user_id = _db.create_user(email, password_hash)
+    user_id = _db.create_user(email, password_hash, first_name, last_name)
     token = _make_token(user_id, email)
-    return jsonify({'token': token, 'user': {'id': user_id, 'email': email}}), 201
+    return jsonify({'token': token, 'user': {
+        'id': user_id, 'email': email,
+        'first_name': first_name, 'last_name': last_name,
+    }}), 201
 
 
 @app.route('/api/auth/login', methods=['POST'])
@@ -526,7 +664,10 @@ def auth_login():
     if not user or not check_password_hash(user['password_hash'], password):
         return jsonify({'error': 'Invalid email or password'}), 401
     token = _make_token(user['id'], user['email'])
-    return jsonify({'token': token, 'user': {'id': user['id'], 'email': user['email']}})
+    return jsonify({'token': token, 'user': {
+        'id': user['id'], 'email': user['email'],
+        'first_name': user.get('first_name', ''), 'last_name': user.get('last_name', ''),
+    }})
 
 
 @app.route('/api/auth/me')
@@ -535,6 +676,19 @@ def auth_me():
     user = _db.get_user_by_id(g.user_id)
     if not user:
         return jsonify({'error': 'User not found'}), 404
+    return jsonify(user)
+
+
+@app.route('/api/auth/me', methods=['PATCH'])
+@require_auth
+def update_me():
+    body       = request.get_json(force=True)
+    first_name = (body.get('first_name') or '').strip()
+    last_name  = (body.get('last_name')  or '').strip()
+    if not first_name or not last_name:
+        return jsonify({'error': 'First name and last name are required'}), 400
+    _db.update_user(g.user_id, first_name, last_name)
+    user = _db.get_user_by_id(g.user_id)
     return jsonify(user)
 
 
@@ -602,6 +756,8 @@ def create_plan():
         start_year=int(body.get('start_year', datetime.now().year)),
         department=body.get('department', 'CS'),
         user_id=g.user_id,
+        plan_type=body.get('plan_type', 'single'),
+        secondary_department=body.get('secondary_department', ''),
     )
     return jsonify(_db.get_plan(plan_id)), 201
 
@@ -615,6 +771,30 @@ def get_plan(plan_id):
     if plan.get('user_id') != g.user_id:
         return jsonify({'error': 'Forbidden'}), 403
     return jsonify(plan)
+
+
+@app.route('/api/plans/<int:plan_id>', methods=['PATCH'])
+@require_auth
+def update_plan(plan_id):
+    plan = _db.get_plan(plan_id)
+    if not plan:
+        return jsonify({'error': 'Not found'}), 404
+    if plan.get('user_id') != g.user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    body = request.get_json(force=True)
+    name = (body.get('name') or plan['name']).strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    _db.update_plan(
+        plan_id,
+        name=name,
+        duration_years=int(body.get('duration_years', plan['duration_years'])),
+        start_year=int(body.get('start_year', plan['start_year'])),
+        department=body.get('department', plan['department']),
+        plan_type=body.get('plan_type', plan.get('plan_type', 'single')),
+        secondary_department=body.get('secondary_department', plan.get('secondary_department', '')),
+    )
+    return jsonify(_db.get_plan(plan_id))
 
 
 @app.route('/api/plans/<int:plan_id>', methods=['DELETE'])
@@ -709,7 +889,7 @@ def ai_recommend():
     # The LLM sees each course's actual content, not just its code, so it can
     # reason accurately and write meaningful one-sentence reasons.
     if _llm.is_available():
-        recs = _llm.get_recommendations(interests, completed, department, candidates[:50])
+        recs = _llm.get_recommendations(interests, completed, department, candidates[:25])
         if recs:
             return jsonify(recs)
 
@@ -814,10 +994,19 @@ def _schedule_courses(courses_dict: Dict[str, Course], completed_set: set,
         # Sort: lowest topo index (earliest in dependency chain) first
         ready.sort(key=lambda x: priority.get(x[0], 9999))
 
+        # Split into level-appropriate vs overdue (below this year's min level,
+        # meaning they should have been placed earlier — still schedule them so
+        # required courses are never silently dropped).  Skip courses that are
+        # too advanced for this year; they will be picked up in a later semester.
+        lo, hi = _YEAR_LEVEL_RANGE.get(year, _YEAR_LEVEL_RANGE[5])
+        preferred  = [(cn, c) for cn, c in ready if lo <= _course_level(cn) <= hi]
+        overdue    = [(cn, c) for cn, c in ready if _course_level(cn) < lo]
+        # courses whose level exceeds hi are intentionally deferred
+
         sem_courses: List[Course] = []
         sem_credits = 0
 
-        for cn, course in ready:
+        for cn, course in preferred + overdue:
             if sem_credits + course.credits <= max_credits:
                 sem_courses.append(course)
                 sem_credits += course.credits
@@ -837,15 +1026,17 @@ def _schedule_courses(courses_dict: Dict[str, Course], completed_set: set,
 
 @app.route('/api/ai/program-plan', methods=['POST'])
 def ai_program_plan():
-    body        = request.get_json(force=True)
-    interests   = (body.get('interests') or '').strip()
-    completed   = body.get('completed_courses', [])
-    department  = body.get('department', 'CS')
-    duration    = max(1, min(int(body.get('duration_years', 4)), 8))
-    max_credits = max(9, min(int(body.get('max_credits_per_semester', 15)), 22))
-    start_year  = int(body.get('start_year', 2025))
+    body             = request.get_json(force=True)
+    interests        = (body.get('interests') or '').strip()
+    completed        = body.get('completed_courses', [])
+    transfer_credits = body.get('transfer_credits', [])   # course numbers already earned via transfer
+    department       = body.get('department', 'CS')
+    duration         = max(1, min(int(body.get('duration_years', 4)), 8))
+    max_credits      = max(9, min(int(body.get('max_credits_per_semester', 15)), 22))
+    start_year       = int(body.get('start_year', 2025))
 
-    completed_set = set(completed)
+    # Transfer credits are treated exactly like completed courses — exclude from plan
+    completed_set = set(completed) | set(transfer_credits)
 
     # ── 1. Load requirements ──────────────────────────────────────────────────
     dept_req  = _db.get_department_requirements(department)
@@ -890,7 +1081,9 @@ def ai_program_plan():
     )
 
     # ── 4. Fill remaining semester capacity with interest-based electives ─────
-    ai_elective_reasons: Dict[str, str] = {}   # course_number → Ollama reason
+    # Program plan uses fast keyword ranking only — LLM re-ranking is skipped
+    # here to keep generation instant. LLM is used in the "Find Courses" tab.
+    ai_elective_reasons: Dict[str, str] = {}
     ai_ranked_plan = False
 
     if interests:
@@ -898,63 +1091,45 @@ def ai_program_plan():
         excluded      = set(courses_to_schedule.keys()) | completed_set
         elective_pool = [c for c in all_courses if c.course_number not in excluded]
         elective_hits = _keyword_search(interests, elective_pool, top_n=40)
+        electives: List[Course] = [c for _, c in elective_hits]
 
-        electives: List[Course] = []
-
-        # Phase 1: try Ollama for AI-ranked elective selection
-        if _llm.is_available() and elective_hits:
-            candidates = [c for _, c in elective_hits]
-            ai_recs    = _llm.get_recommendations(interests, completed, department, candidates)
-            if ai_recs:
-                ai_ranked_plan      = True
-                ai_elective_reasons = {
-                    rec['course']['course_number']: rec['reason'] for rec in ai_recs
-                }
-                # AI-selected courses first (in Ollama rank order), then keyword remainder
-                ai_cns   = {rec['course']['course_number'] for rec in ai_recs}
-                ai_rank  = {rec['course']['course_number']: i for i, rec in enumerate(ai_recs)}
-                ai_first = sorted(
-                    [c for _, c in elective_hits if c.course_number in ai_cns],
-                    key=lambda c: ai_rank.get(c.course_number, 999),
-                )
-                rest     = [c for _, c in elective_hits if c.course_number not in ai_cns]
-                electives = ai_first + rest
-                print(f"Ollama selected {len(ai_first)} electives for program plan")
-
-        # Phase 2: fallback to keyword order when Ollama is unavailable / returned nothing
-        if not electives:
-            electives = [c for _, c in elective_hits]
-
-        elective_idx = 0
+        # Build a per-semester elective pool sorted by level appropriateness,
+        # so we never place a 400-level elective in year 1, etc.
+        remaining_electives = list(electives)
 
         # First pass: fill existing semesters that have room
         for sem in semesters:
-            while elective_idx < len(electives):
-                ec = electives[elective_idx]
+            sem_year = sem['year']
+            # Pick only electives whose level fits this year
+            fitting     = [e for e in remaining_electives if _level_ok(e.course_number, sem_year)]
+            non_fitting = [e for e in remaining_electives if not _level_ok(e.course_number, sem_year)]
+            added_this_sem: List[Course] = []
+            for ec in fitting:
                 if sem['credits'] + ec.credits <= max_credits:
                     sem['courses'].append(ec)
                     sem['credits'] += ec.credits
                     excluded.add(ec.course_number)
-                    elective_idx += 1
-                else:
-                    break
+                    added_this_sem.append(ec)
+            added_set = {e.course_number for e in added_this_sem}
+            remaining_electives = [e for e in remaining_electives if e.course_number not in added_set]
 
         # Second pass: open new semesters for remaining electives
         total_slots = duration * 2
-        while elective_idx < len(electives) and len(semesters) < total_slots:
+        while remaining_electives and len(semesters) < total_slots:
             sem_idx     = len(semesters)
             year        = (sem_idx // 2) + 1
             semester    = (sem_idx % 2) + 1
-            sem_courses = []
+            fitting     = [e for e in remaining_electives if _level_ok(e.course_number, year)]
+            sem_courses: List[Course] = []
             sem_credits = 0
-            while elective_idx < len(electives):
-                ec = electives[elective_idx]
+            added_this_sem = []
+            for ec in fitting:
                 if sem_credits + ec.credits <= max_credits:
                     sem_courses.append(ec)
                     sem_credits += ec.credits
-                    elective_idx += 1
-                else:
-                    break
+                    added_this_sem.append(ec)
+            added_set = {e.course_number for e in added_this_sem}
+            remaining_electives = [e for e in remaining_electives if e.course_number not in added_set]
             if sem_courses:
                 semesters.append({'year': year, 'semester': semester,
                                    'courses': sem_courses, 'credits': sem_credits})
@@ -1010,9 +1185,472 @@ def ai_program_plan():
     })
 
 
+# ── Plan Sharing ──────────────────────────────────────────────────────────────
+
+@app.route('/api/plans/<int:plan_id>/share', methods=['POST'])
+@require_auth
+def create_share_link(plan_id):
+    plan = _db.get_plan(plan_id)
+    if not plan:
+        return jsonify({'error': 'Not found'}), 404
+    if plan.get('user_id') != g.user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    # Return existing token if already shared, otherwise generate a new one
+    token = plan.get('share_token') or _db.generate_share_token(plan_id)
+    return jsonify({'share_token': token})
+
+
+@app.route('/api/plans/<int:plan_id>/share', methods=['DELETE'])
+@require_auth
+def revoke_share_link(plan_id):
+    plan = _db.get_plan(plan_id)
+    if not plan:
+        return jsonify({'error': 'Not found'}), 404
+    if plan.get('user_id') != g.user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    _db.revoke_share_token(plan_id)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/shared/<token>', methods=['GET'])
+def get_shared_plan(token):
+    plan = _db.get_plan_by_share_token(token)
+    if not plan:
+        return jsonify({'error': 'Shared plan not found or link has been revoked'}), 404
+    # Exclude internal fields
+    return jsonify({k: v for k, v in plan.items() if k != 'user_id'})
+
+
+@app.route('/api/shared/<token>/courses', methods=['GET'])
+def get_shared_plan_courses(token):
+    plan = _db.get_plan_by_share_token(token)
+    if not plan:
+        return jsonify({'error': 'Shared plan not found or link has been revoked'}), 404
+    pcs = _db.get_plan_courses(plan['id'])
+    return jsonify([pc.to_dict() for pc in pcs])
+
+
+# ── PDF Export ────────────────────────────────────────────────────────────────
+
+GRADE_POINTS = {
+    'A+': 4.0, 'A': 4.0, 'A-': 3.7,
+    'B+': 3.3, 'B': 3.0, 'B-': 2.7,
+    'C+': 2.3, 'C': 2.0, 'C-': 1.7,
+    'D+': 1.3, 'D': 1.0, 'D-': 0.7,
+    'F':  0.0,
+}
+
+
+def _calc_gpa(items):  # items: list of (credits, grade)
+    total_pts, total_cr = 0.0, 0
+    for credits, grade in items:
+        pts = GRADE_POINTS.get((grade or '').strip().upper())
+        if pts is not None:
+            total_pts += pts * credits
+            total_cr  += credits
+    return round(total_pts / total_cr, 2) if total_cr else None
+
+
+def _to_rel_year(year_val, plan):
+    duration   = plan.get('duration_years', 4)
+    start_year = plan.get('start_year', 2024)
+    if year_val > duration:
+        rel = year_val - start_year + 1
+        return max(1, min(duration, rel))
+    return year_val
+
+
+def _generate_plan_pdf(plan: dict, plan_courses: List[PlanCourse], user_email: str = '') -> bytes:
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.lib.colors import HexColor, white, black
+        from reportlab.platypus import (
+            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+        )
+        from io import BytesIO
+    except ImportError:
+        raise RuntimeError('reportlab is not installed. Run: pip install reportlab')
+
+    # ── Colours ────────────────────────────────────────────────────────────────
+    GOLD      = HexColor('#CFB991')
+    DARK      = HexColor('#1a1a2e')
+    MUTED     = HexColor('#6b7280')
+    PLANNED   = HexColor('#9ca3af')
+    IN_PROG   = HexColor('#f59e0b')
+    COMPLETED = HexColor('#22c55e')
+    ROW_ALT   = HexColor('#f9fafb')
+    BORDER    = HexColor('#e5e7eb')
+
+    STATUS_LABEL = {'planned': 'Planned', 'in_progress': 'In Progress', 'completed': 'Completed'}
+    STATUS_COLOR = {'planned': PLANNED, 'in_progress': IN_PROG, 'completed': COMPLETED}
+    TERM         = {1: 'Fall', 2: 'Spring', 3: 'Summer'}
+
+    buf  = BytesIO()
+    doc  = SimpleDocTemplate(
+        buf,
+        pagesize=letter,
+        leftMargin=0.65 * inch, rightMargin=0.65 * inch,
+        topMargin=0.75 * inch, bottomMargin=0.65 * inch,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'PlanTitle', parent=styles['Title'],
+        fontSize=20, textColor=DARK, spaceAfter=4, leading=24,
+        alignment=0,  # left-align
+    )
+    sub_style = ParagraphStyle(
+        'PlanSub', parent=styles['Normal'],
+        fontSize=9, textColor=MUTED, spaceAfter=2,
+    )
+    name_style = ParagraphStyle(
+        'PlanName', parent=title_style,
+        alignment=2,  # right-align; everything else inherited from title_style
+    )
+    sub_style_right = ParagraphStyle(
+        'PlanSubRight', parent=styles['Normal'],
+        fontSize=9, textColor=MUTED, spaceAfter=2,
+        alignment=2,  # right-align
+    )
+    year_style = ParagraphStyle(
+        'YearHeader', parent=styles['Normal'],
+        fontSize=8, textColor=MUTED, fontName='Helvetica-Bold',
+        spaceBefore=14, spaceAfter=4, textTransform='uppercase',
+    )
+    sem_style = ParagraphStyle(
+        'SemHeader', parent=styles['Normal'],
+        fontSize=10, textColor=white, fontName='Helvetica-Bold',
+        spaceAfter=0,
+    )
+    stat_style = ParagraphStyle(
+        'Stat', parent=styles['Normal'],
+        fontSize=8, textColor=MUTED, spaceAfter=2,
+    )
+
+    # ── Derived plan data ──────────────────────────────────────────────────────
+    duration   = plan.get('duration_years', 4)
+    start_year = plan.get('start_year', 2024)
+
+    # Normalise year values and build slot map
+    slot_map: dict = {}
+    for pc in plan_courses:
+        yr  = _to_rel_year(pc.year, plan)
+        key = (yr, pc.semester)
+        slot_map.setdefault(key, []).append(pc)
+
+    total_credits     = sum(pc.course.credits for pc in plan_courses)
+    completed_credits = sum(
+        pc.course.credits for pc in plan_courses if pc.status == 'completed'
+    )
+    overall_gpa = _calc_gpa([
+        (pc.course.credits, pc.grade)
+        for pc in plan_courses if pc.status == 'completed'
+    ])
+
+    has_summer    = any(pc.semester == 3 for pc in plan_courses)
+    sem_types     = [1, 2, 3] if has_summer else [1, 2]
+
+    def sem_label(year, semester):
+        cal = start_year + (year - 1) + (1 if semester == 2 else 0)
+        return f"{TERM[semester]} {cal}"
+
+    # ── Build cumulative GPA map ───────────────────────────────────────────────
+    cum_accum: list = []
+    cum_gpa_map: dict = {}
+    sem_gpa_map: dict = {}
+    for yr in range(1, duration + 1):
+        for sem in sem_types:
+            courses = slot_map.get((yr, sem), [])
+            sem_items = [
+                (pc.course.credits, pc.grade)
+                for pc in courses if pc.status == 'completed'
+            ]
+            sem_gpa_map[(yr, sem)] = _calc_gpa(sem_items)
+            cum_accum.extend(sem_items)
+            cum_gpa_map[(yr, sem)] = _calc_gpa(cum_accum)
+
+    # ── Build story ────────────────────────────────────────────────────────────
+    story = []
+
+    # Header block
+    full_name = ''
+    if user_email:
+        user_rec = _db.get_user_by_email(user_email)
+        if user_rec:
+            full_name = f"{user_rec.get('first_name', '')} {user_rec.get('last_name', '')}".strip()
+
+    plan_type   = plan.get('plan_type', 'single')
+    secondary   = (plan.get('secondary_department') or '').strip()
+    primary_dept = plan.get('department', '')
+    if plan_type == 'double_major' and secondary:
+        dept_label = f"{primary_dept} & {secondary} (Double Major)"
+    elif plan_type == 'major_minor' and secondary:
+        dept_label = f"{primary_dept} + {secondary} (Minor)"
+    else:
+        dept_label = primary_dept
+    sub_line = f"{dept_label} · {duration}-Year Plan · {start_year}–{start_year + duration - 1}"
+
+    # Two-column header: plan info left, owner info right
+    left_cell  = [Paragraph(plan.get('name', 'Course Plan'), title_style),
+                  Paragraph(sub_line, sub_style)]
+    right_cell = []
+    if full_name:
+        right_cell.append(Paragraph(full_name, name_style))
+    if user_email:
+        right_cell.append(Paragraph(user_email, sub_style_right))
+
+    if right_cell:
+        header_tbl = Table([[left_cell, right_cell]], colWidths=['55%', '45%'])
+        header_tbl.setStyle(TableStyle([
+            ('VALIGN',        (0, 0), (-1, -1), 'TOP'),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 0),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 0),
+            ('TOPPADDING',    (0, 0), (-1, -1), 0),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+        ]))
+        story.append(header_tbl)
+    else:
+        story.append(Paragraph(plan.get('name', 'Course Plan'), title_style))
+        story.append(Paragraph(sub_line, sub_style))
+
+    story.append(HRFlowable(width='100%', thickness=2, color=GOLD, spaceAfter=8))
+
+    # Summary row
+    transfer_cr_total = sum(
+        pc.course.credits for pc in plan_courses if pc.year == 0 and pc.semester == 0
+    )
+    gpa_str = f"{overall_gpa:.2f}" if overall_gpa is not None else '—'
+    if transfer_cr_total:
+        summary_data = [['Transfer Credits', 'Credits Planned', 'Credits Completed', 'Cumulative GPA', 'Generated']]
+        summary_data.append([
+            str(transfer_cr_total),
+            str(total_credits),
+            str(completed_credits),
+            gpa_str,
+            datetime.now().strftime('%B %d, %Y'),
+        ])
+    else:
+        summary_data = [['Credits Planned', 'Credits Completed', 'Cumulative GPA', 'Generated']]
+        summary_data.append([
+            str(total_credits),
+            str(completed_credits),
+            gpa_str,
+            datetime.now().strftime('%B %d, %Y'),
+        ])
+    summary_table = Table(summary_data, colWidths=['*'] * len(summary_data[0]))
+    summary_table.setStyle(TableStyle([
+        ('BACKGROUND',  (0, 0), (-1, 0), DARK),
+        ('TEXTCOLOR',   (0, 0), (-1, 0), GOLD),
+        ('FONTNAME',    (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE',    (0, 0), (-1, 0), 8),
+        ('ALIGN',       (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME',    (0, 1), (-1, 1), 'Helvetica-Bold'),
+        ('FONTSIZE',    (0, 1), (-1, 1), 12),
+        ('TEXTCOLOR',   (0, 1), (-1, 1), DARK),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [HexColor('#f3f4f6')]),
+        ('TOPPADDING',  (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('GRID',        (0, 0), (-1, -1), 0.5, BORDER),
+        ('ROUNDEDCORNERS', [4]),
+    ]))
+    story.append(summary_table)
+    story.append(Spacer(1, 16))
+
+    # Transfer credits section
+    transfer_courses = [pc for pc in plan_courses if pc.year == 0 and pc.semester == 0]
+    if transfer_courses:
+        transfer_credits = sum(pc.course.credits for pc in transfer_courses)
+        story.append(Paragraph('TRANSFER CREDITS', year_style))
+
+        xfer_hdr_data = [[
+            Paragraph(f"Transfer Credits  —  {transfer_credits} cr", sem_style)
+        ]]
+        xfer_hdr_tbl = Table(xfer_hdr_data, colWidths=[page_w if 'page_w' in dir() else (letter[0] - 1.30 * inch)])
+        # page_w not defined yet — compute inline
+        _pw = letter[0] - 1.30 * inch
+        xfer_hdr_tbl = Table(xfer_hdr_data, colWidths=[_pw])
+        xfer_hdr_tbl.setStyle(TableStyle([
+            ('BACKGROUND',    (0, 0), (-1, -1), HexColor('#92400e')),
+            ('TOPPADDING',    (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 10),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 10),
+        ]))
+        story.append(xfer_hdr_tbl)
+
+        _col_w = [1.1 * inch, _pw - 1.1 * inch - 0.48 * inch - 0.85 * inch - 0.48 * inch,
+                  0.48 * inch, 0.85 * inch, 0.48 * inch]
+        xfer_data = [['Course', 'Title', 'Cr', 'Status', 'Grade']]
+        for pc in sorted(transfer_courses, key=lambda x: x.course.course_number):
+            xfer_data.append([
+                pc.course.course_number,
+                pc.course.title,
+                str(pc.course.credits),
+                'Transfer',
+                pc.grade or '—',
+            ])
+        xfer_tbl = Table(xfer_data, colWidths=_col_w)
+        xfer_tbl.setStyle(TableStyle([
+            ('BACKGROUND',    (0, 0), (-1, 0), HexColor('#374151')),
+            ('TEXTCOLOR',     (0, 0), (-1, 0), GOLD),
+            ('FONTNAME',      (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE',      (0, 0), (-1, 0), 7.5),
+            ('ALIGN',         (2, 0), (4, -1), 'CENTER'),
+            ('FONTSIZE',      (0, 1), (-1, -1), 8),
+            ('FONTNAME',      (0, 1), (0, -1), 'Helvetica-Bold'),
+            ('TEXTCOLOR',     (3, 1), (3, -1), HexColor('#16a34a')),
+            ('FONTNAME',      (3, 1), (3, -1), 'Helvetica-Bold'),
+            ('TOPPADDING',    (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 6),
+            ('GRID',          (0, 0), (-1, -1), 0.4, BORDER),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [white, ROW_ALT]),
+        ]))
+        story.append(xfer_tbl)
+        story.append(Spacer(1, 16))
+
+    # Semester grids
+    page_w = letter[0] - 1.30 * inch  # usable width
+    col_widths = [1.1 * inch, None, 0.48 * inch, 0.85 * inch, 0.48 * inch]
+    # title column takes remaining space
+    col_widths[1] = page_w - sum(w for w in col_widths if w is not None)
+
+    for yr in range(1, duration + 1):
+        story.append(Paragraph(
+            f"YEAR {yr}  ·  {start_year + yr - 1}–{start_year + yr}",
+            year_style,
+        ))
+
+        for sem in sem_types:
+            courses = sorted(
+                slot_map.get((yr, sem), []),
+                key=lambda pc: pc.course.course_number,
+            )
+            total_cr  = sum(pc.course.credits for pc in courses)
+            sem_gpa   = sem_gpa_map.get((yr, sem))
+            cum_gpa   = cum_gpa_map.get((yr, sem))
+
+            # Semester header
+            gpa_parts = []
+            if sem_gpa is not None:
+                gpa_parts.append(f"Sem GPA {sem_gpa:.2f}")
+            if cum_gpa is not None:
+                gpa_parts.append(f"Cum GPA {cum_gpa:.2f}")
+            gpa_suffix = f"  |  {' · '.join(gpa_parts)}" if gpa_parts else ''
+
+            sem_hdr_data = [[
+                Paragraph(
+                    f"{sem_label(yr, sem)}  —  {total_cr} cr{gpa_suffix}",
+                    sem_style,
+                )
+            ]]
+            sem_hdr_tbl = Table(sem_hdr_data, colWidths=[page_w])
+            sem_hdr_tbl.setStyle(TableStyle([
+                ('BACKGROUND',    (0, 0), (-1, -1), DARK),
+                ('TOPPADDING',    (0, 0), (-1, -1), 6),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                ('LEFTPADDING',   (0, 0), (-1, -1), 10),
+                ('RIGHTPADDING',  (0, 0), (-1, -1), 10),
+            ]))
+            story.append(sem_hdr_tbl)
+
+            if not courses:
+                no_courses_data = [['No courses planned for this semester.']]
+                no_courses_tbl = Table(no_courses_data, colWidths=[page_w])
+                no_courses_tbl.setStyle(TableStyle([
+                    ('TEXTCOLOR',     (0, 0), (-1, -1), MUTED),
+                    ('FONTSIZE',      (0, 0), (-1, -1), 8),
+                    ('FONTNAME',      (0, 0), (-1, -1), 'Helvetica-Oblique'),
+                    ('ALIGN',         (0, 0), (-1, -1), 'CENTER'),
+                    ('TOPPADDING',    (0, 0), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                    ('GRID',          (0, 0), (-1, -1), 0.5, BORDER),
+                ]))
+                story.append(no_courses_tbl)
+            else:
+                # Column headers
+                tbl_data = [['Course', 'Title', 'Cr', 'Status', 'Grade']]
+                for i, pc in enumerate(courses):
+                    status_col = STATUS_LABEL.get(pc.status, pc.status)
+                    tbl_data.append([
+                        pc.course.course_number,
+                        pc.course.title,
+                        str(pc.course.credits),
+                        status_col,
+                        pc.grade or '—',
+                    ])
+
+                course_tbl = Table(tbl_data, colWidths=col_widths)
+
+                # Build per-row status colour stripes
+                row_styles = [
+                    ('BACKGROUND',    (0, 0), (-1, 0), HexColor('#374151')),
+                    ('TEXTCOLOR',     (0, 0), (-1, 0), GOLD),
+                    ('FONTNAME',      (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE',      (0, 0), (-1, 0), 7.5),
+                    ('ALIGN',         (2, 0), (4, -1), 'CENTER'),
+                    ('FONTSIZE',      (0, 1), (-1, -1), 8),
+                    ('FONTNAME',      (0, 1), (0, -1), 'Helvetica-Bold'),
+                    ('TOPPADDING',    (0, 0), (-1, -1), 4),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                    ('LEFTPADDING',   (0, 0), (-1, -1), 6),
+                    ('RIGHTPADDING',  (0, 0), (-1, -1), 6),
+                    ('GRID',          (0, 0), (-1, -1), 0.4, BORDER),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [white, ROW_ALT]),
+                ]
+                for row_idx, pc in enumerate(courses, start=1):
+                    status_c = STATUS_COLOR.get(pc.status, MUTED)
+                    # coloured left border via a thin left-column background isn't
+                    # directly supported, so tint the status cell instead
+                    row_styles.append(('TEXTCOLOR', (3, row_idx), (3, row_idx), status_c))
+                    row_styles.append(('FONTNAME',  (3, row_idx), (3, row_idx), 'Helvetica-Bold'))
+
+                course_tbl.setStyle(TableStyle(row_styles))
+                story.append(course_tbl)
+
+            story.append(Spacer(1, 8))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+@app.route('/api/plans/<int:plan_id>/pdf', methods=['GET'])
+@require_auth
+def download_plan_pdf(plan_id):
+    from flask import send_file
+    from io import BytesIO
+
+    plan = _db.get_plan(plan_id)
+    if not plan:
+        return jsonify({'error': 'Not found'}), 404
+    if plan.get('user_id') != g.user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    plan_courses = _db.get_plan_courses(plan_id)
+
+    try:
+        pdf_bytes = _generate_plan_pdf(plan, plan_courses, user_email=g.user_email)
+    except RuntimeError as e:
+        return jsonify({'error': str(e)}), 500
+
+    safe_name = ''.join(c if c.isalnum() or c in (' ', '-', '_') else '_'
+                        for c in plan.get('name', 'plan')).strip().replace(' ', '_')
+    filename  = f"{safe_name}_course_plan.pdf"
+
+    return send_file(
+        BytesIO(pdf_bytes),
+        mimetype='application/pdf',
+        as_attachment=True,
+        download_name=filename,
+    )
+
+
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    print("Purdue Course Planner API running at http://127.0.0.1:5000")
+    print("Purdue Course Planner API running at http://127.0.0.1:5050")
     print("Start the React frontend with: cd frontend && npm run dev")
-    app.run(host='127.0.0.1', port=5000, debug=True)
+    app.run(host='127.0.0.1', port=5050, debug=True)

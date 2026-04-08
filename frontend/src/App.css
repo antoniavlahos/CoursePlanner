@@ -213,4 +213,5 @@ input:focus, select:focus, textarea:focus { border-color: var(--gold-2); box-sha
 .auth-switch { text-align: center; font-size: .83rem; color: var(--muted); margin-top: 16px; }
 .auth-switch a { color: var(--blue); font-weight: 600; text-decoration: underline; }
 .sidebar-user { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+.sidebar-user-name  { font-size: .82rem; font-weight: 600; color: rgba(255,255,255,.9); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 2px; }
 .sidebar-user-email { font-size: .72rem; color: rgba(255,255,255,.5); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 2px; }

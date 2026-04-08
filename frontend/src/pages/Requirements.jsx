@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { usePlan } from '../App.jsx'
-import { getPlanCourses, getDeptRequirements, getUniversityRequirements } from '../api.js'
+import { getPlanCourses, getDeptRequirements, getUniversityRequirements, getCourses, addCourseToPlan } from '../api.js'
 import CourseDetailDrawer from '../components/CourseDetailDrawer.jsx'
 
 const TERM = { 1: 'Fall', 2: 'Spring', 3: 'Summer' }
@@ -46,6 +46,92 @@ function gpaColor(gpa) {
   if (n >= 3.0) return '#84cc16'
   if (n >= 2.0) return '#f59e0b'
   return '#ef4444'
+}
+
+const SEM_NAME = { 1: 'Fall', 2: 'Spring', 3: 'Summer' }
+
+// ── Add-to-plan modal ─────────────────────────────────────────────────────────
+function AddModal({ course, plan, onClose, onAdded }) {
+  const [year, setYear]       = useState(1)
+  const [semester, setSemester] = useState(1)
+  const [loading, setLoading] = useState(false)
+  const [error, setError]     = useState('')
+
+  const offeredTerms = course.terms_offered ?? []
+  const notOffered   = offeredTerms.length > 0 && !offeredTerms.includes(SEM_NAME[semester])
+
+  async function handleAdd() {
+    setLoading(true); setError('')
+    try {
+      await addCourseToPlan(plan.id, { course_id: course.id, semester, year })
+      onAdded()
+      onClose()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-title">Add to Plan</div>
+
+        <div style={{ background: '#f8f8f8', borderRadius: 8, padding: '10px 14px', marginBottom: 20 }}>
+          <div style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: '1rem', color: 'var(--blue)', marginBottom: 2 }}>
+            {course.course_number}
+          </div>
+          <div style={{ fontWeight: 600, fontSize: '.92rem', marginBottom: 4 }}>{course.title}</div>
+          <div style={{ fontSize: '.78rem', color: 'var(--muted)' }}>{course.credits} credits · {course.department}</div>
+        </div>
+
+        <div className="form-group">
+          <label>Year</label>
+          <div className="pill-group">
+            {Array.from({ length: plan.duration_years }, (_, i) => i + 1).map((y) => (
+              <label key={y}>
+                <input type="radio" name="year" value={y} checked={year === y} onChange={() => setYear(y)} />
+                Year {y}
+                <span className="pill-sub">{plan.start_year + y - 1}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label>Semester</label>
+          <div className="pill-group">
+            {[[1, 'Fall', '🍂'], [2, 'Spring', '🌱'], [3, 'Summer', '☀️']].map(([val, name, icon]) => (
+              <label key={val}>
+                <input type="radio" name="sem" value={val} checked={semester === val} onChange={() => setSemester(val)} />
+                {icon} {name}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {notOffered && (
+          <div style={{
+            background: '#fffbea', color: '#92400e',
+            border: '1px solid #fcd34d', borderRadius: 8,
+            padding: '8px 12px', marginBottom: 8, fontSize: '.82rem',
+          }}>
+            ⚠️ <strong>{course.course_number}</strong> is typically offered in {offeredTerms.join(' & ')} only.
+          </div>
+        )}
+
+        {error && <div className="error-msg">{error}</div>}
+
+        <div className="modal-actions">
+          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn btn-success" onClick={handleAdd} disabled={loading}>
+            {loading ? 'Adding…' : '+ Add to Plan'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 // ── Semester card ─────────────────────────────────────────────────────────────
@@ -165,6 +251,18 @@ export default function Requirements() {
   const [univReqs, setUnivReqs] = useState([])
   const [loading, setLoading] = useState(true)
   const [drawerCourse, setDrawerCourse] = useState(null)
+  const [addModalCourse, setAddModalCourse] = useState(null)
+
+  async function handleOpenAdd(courseNum) {
+    // Look up the full course object by number
+    const results = await getCourses(courseNum)
+    const course  = results.find((c) => c.course_number === courseNum)
+    if (course) setAddModalCourse(course)
+  }
+
+  function reloadPlanCourses() {
+    getPlanCourses(currentPlanId).then(setPlanCourses).catch(() => {})
+  }
 
   useEffect(() => {
     if (!currentPlanId || !currentPlan) { setLoading(false); return }
@@ -376,15 +474,28 @@ export default function Requirements() {
                 </span>
               </div>
               {deptReqs.required_courses.map((courseNum) => {
-                const done = completedNums.has(courseNum)
+                const done      = completedNums.has(courseNum)
+                const inPlan    = planCourses.some((pc) => pc.course.course_number === courseNum)
                 return (
-                  <div key={courseNum} className="req-item">
-                    <span className="req-icon">{done ? '✅' : '⭕'}</span>
-                    <div>
+                  <div key={courseNum} className="req-item" style={{ justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span className="req-icon">{done ? '✅' : '⭕'}</span>
                       <div className="req-name" style={{ color: done ? 'var(--green)' : 'var(--muted)' }}>
                         {courseNum}
                       </div>
                     </div>
+                    {!inPlan && (
+                      <button
+                        className="btn btn-primary btn-sm"
+                        style={{ flexShrink: 0 }}
+                        onClick={() => handleOpenAdd(courseNum)}
+                      >
+                        + Add to Plan
+                      </button>
+                    )}
+                    {inPlan && !done && (
+                      <span style={{ fontSize: '.72rem', color: 'var(--muted)', fontStyle: 'italic' }}>In plan</span>
+                    )}
                   </div>
                 )
               })}
@@ -419,6 +530,15 @@ export default function Requirements() {
             })}
           </div>
         </>
+      )}
+
+      {addModalCourse && currentPlan && (
+        <AddModal
+          course={addModalCourse}
+          plan={currentPlan}
+          onClose={() => setAddModalCourse(null)}
+          onAdded={reloadPlanCourses}
+        />
       )}
 
       {drawerCourse && (

@@ -4,9 +4,11 @@ import Catalog from './pages/Catalog.jsx'
 import MyPlan from './pages/MyPlan.jsx'
 import Requirements from './pages/Requirements.jsx'
 import AiPlanner from './pages/AiPlanner.jsx'
-import Settings from './pages/Settings.jsx'
+import AccountSettings from './pages/AccountSettings.jsx'
+import Plans from './pages/Plans.jsx'
 import Login from './pages/Login.jsx'
 import Register from './pages/Register.jsx'
+import SharedPlan from './pages/SharedPlan.jsx'
 import { getPlan, getMe } from './api.js'
 
 // ── Auth Context ───────────────────────────────────────────────────────────────
@@ -23,11 +25,12 @@ export function usePlan() { return useContext(PlanContext) }
 
 // ── Sidebar ────────────────────────────────────────────────────────────────────
 const NAV = [
-  { to: '/catalog',      icon: '📚', label: 'Course Catalog' },
-  { to: '/plan',         icon: '📋', label: 'My Plan' },
-  { to: '/requirements', icon: '✅', label: 'Requirements' },
-  { to: '/ai',           icon: '🤖', label: 'AI Planner' },
-  { to: '/settings',     icon: '⚙️',  label: 'Settings' },
+  { to: '/catalog',          icon: '📚', label: 'Course Catalog' },
+  { to: '/plan',             icon: '📋', label: 'My Plan' },
+  { to: '/requirements',     icon: '✅', label: 'Requirements' },
+  { to: '/ai',               icon: '🤖', label: 'AI Planner' },
+  { to: '/plans',            icon: '🗂️',  label: 'Plans' },
+  { to: '/account-settings', icon: '⚙️',  label: 'Account Settings' },
 ]
 
 function Sidebar() {
@@ -50,12 +53,19 @@ function Sidebar() {
           <span>{label}</span>
         </NavLink>
       ))}
-      <hr className="sidebar-divider" />
+      <hr className="sidebar-divider" style={{ borderTopColor: '#d1d5db', marginLeft: 'auto', marginRight: 'auto', width: '100%' }} />
       {currentPlan ? (
         <div className="sidebar-plan">
           <div className="label">Current Plan</div>
           <div className="name">{currentPlan.name}</div>
-          <div className="detail">{currentPlan.department} · {currentPlan.duration_years}yr · {currentPlan.start_year}</div>
+          <div className="detail">
+            {currentPlan.plan_type === 'double_major' && currentPlan.secondary_department
+              ? `${currentPlan.department} & ${currentPlan.secondary_department}`
+              : currentPlan.plan_type === 'major_minor' && currentPlan.secondary_department
+              ? `${currentPlan.department} + ${currentPlan.secondary_department} (Minor)`
+              : currentPlan.department
+            } · {currentPlan.duration_years}yr · {currentPlan.start_year}
+          </div>
         </div>
       ) : (
         <div className="sidebar-plan">
@@ -63,8 +73,14 @@ function Sidebar() {
         </div>
       )}
       <div className="sidebar-btns">
-        <NavLink to="/settings" className="btn btn-gold btn-full btn-sm">+ New / Load Plan</NavLink>
+        <NavLink to="/plans" className="btn btn-gold btn-full btn-sm">+ New / Load Plan</NavLink>
+        <hr className="sidebar-divider" style={{ marginTop: 12, marginLeft: 'auto', marginRight: 'auto', width: '100%', borderTopColor: '#d1d5db' }} />
         <div className="sidebar-user">
+          {(auth?.user?.first_name || auth?.user?.last_name) && (
+            <span className="sidebar-user-name">
+              {[auth.user.first_name, auth.user.last_name].filter(Boolean).join(' ')}
+            </span>
+          )}
           <span className="sidebar-user-email">{auth?.user?.email}</span>
           <button className="btn btn-outline btn-sm btn-full" onClick={logout}>Sign out</button>
         </div>
@@ -108,7 +124,8 @@ function AppLayout() {
             <Route path="/plan" element={<MyPlan />} />
             <Route path="/requirements" element={<Requirements />} />
             <Route path="/ai" element={<AiPlanner />} />
-            <Route path="/settings" element={<Settings />} />
+            <Route path="/plans" element={<Plans />} />
+            <Route path="/account-settings" element={<AccountSettings />} />
           </Routes>
         </main>
       </div>
@@ -147,6 +164,7 @@ export default function App() {
         <Routes>
           <Route path="/login" element={auth ? <Navigate to="/catalog" replace /> : <Login />} />
           <Route path="/register" element={auth ? <Navigate to="/catalog" replace /> : <Register />} />
+          <Route path="/shared/:token" element={<SharedPlan />} />
           <Route path="/*" element={<AppLayout />} />
         </Routes>
       </Router>

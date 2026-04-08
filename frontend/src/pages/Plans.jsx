@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { usePlan, useAuth } from '../App.jsx'
-import { getPlans, createPlan, deletePlan, updatePlan, getDepartments, updateMe, createShareLink, revokeShareLink } from '../api.js'
+import { usePlan } from '../App.jsx'
+import { getPlans, createPlan, deletePlan, updatePlan, getDepartments, createShareLink, revokeShareLink } from '../api.js'
 
 const PLAN_TYPES = [
   { value: 'single',       label: 'Single Major' },
@@ -220,51 +220,26 @@ function EditPlanModal({ plan, departments, onSaved, onClose }) {
   )
 }
 
-export default function Settings() {
+export default function Plans() {
   const { currentPlanId, currentPlan, setCurrentPlanId } = usePlan()
-  const { auth, setAuth } = useAuth()
 
-  // ── Account form state ────────────────────────────────────────────────────
-  const [firstName, setFirstName]     = useState(auth?.user?.first_name ?? '')
-  const [lastName,  setLastName]       = useState(auth?.user?.last_name  ?? '')
-  const [accountSaving,  setAccountSaving]  = useState(false)
-  const [accountError,   setAccountError]   = useState('')
-  const [accountSuccess, setAccountSuccess] = useState(false)
+  const [plans, setPlans]           = useState([])
+  const [departments, setDepartments] = useState([])
+  const [showCreate, setShowCreate] = useState(false)
+  const [editingPlan, setEditingPlan] = useState(null)
+  const [loading, setLoading]       = useState(true)
 
-  async function handleSaveAccount(e) {
-    e.preventDefault()
-    if (!firstName.trim() || !lastName.trim()) {
-      setAccountError('First name and last name are required.')
-      return
-    }
-    setAccountSaving(true)
-    setAccountError('')
-    setAccountSuccess(false)
-    try {
-      const updated = await updateMe(firstName.trim(), lastName.trim())
-      setAuth((prev) => ({ ...prev, user: { ...prev.user, ...updated } }))
-      setAccountSuccess(true)
-      setTimeout(() => setAccountSuccess(false), 3000)
-    } catch (err) {
-      setAccountError(err.message)
-    } finally {
-      setAccountSaving(false)
-    }
-  }
-
-  // ── Share link state ──────────────────────────────────────────────────────
+  // ── Share link state ────────────────────────────────────────────────────────
   const [shareToken,   setShareToken]   = useState(null)
   const [shareWorking, setShareWorking] = useState(false)
   const [copied,       setCopied]       = useState(false)
 
-  // Sync share token whenever the active plan changes
   useEffect(() => {
     setShareToken(currentPlan?.share_token ?? null)
+    setCopied(false)
   }, [currentPlan?.id])
 
-  const shareUrl = shareToken
-    ? `${window.location.origin}/shared/${shareToken}`
-    : null
+  const shareUrl = shareToken ? `${window.location.origin}/shared/${shareToken}` : null
 
   async function handleGenerateLink() {
     if (!currentPlanId) return
@@ -301,12 +276,6 @@ export default function Settings() {
     })
   }
 
-  const [plans, setPlans] = useState([])
-  const [departments, setDepartments] = useState([])
-  const [showCreate, setShowCreate] = useState(false)
-  const [editingPlan, setEditingPlan] = useState(null)
-  const [loading, setLoading] = useState(true)
-
   useEffect(() => {
     getDepartments().then(setDepartments).catch(() => {})
   }, [])
@@ -333,49 +302,7 @@ export default function Settings() {
 
   return (
     <>
-      <h1 className="page-title">Settings</h1>
-
-      {/* Account Information */}
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-title">Account Information</div>
-        <form onSubmit={handleSaveAccount}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-            <div className="form-group" style={{ margin: 0 }}>
-              <label>First name</label>
-              <input
-                value={firstName}
-                onChange={(e) => setFirstName(e.target.value)}
-                placeholder="Jane"
-                required
-              />
-            </div>
-            <div className="form-group" style={{ margin: 0 }}>
-              <label>Last name</label>
-              <input
-                value={lastName}
-                onChange={(e) => setLastName(e.target.value)}
-                placeholder="Doe"
-                required
-              />
-            </div>
-          </div>
-          <div className="form-group" style={{ margin: 0, marginBottom: 12 }}>
-            <label>Email</label>
-            <input value={auth?.user?.email ?? ''} disabled style={{ opacity: .6, cursor: 'not-allowed' }} />
-          </div>
-          {accountError   && <div className="error-msg" style={{ marginBottom: 8 }}>{accountError}</div>}
-          {accountSuccess && (
-            <div style={{ color: '#16a34a', fontSize: '.84rem', marginBottom: 8, fontWeight: 600 }}>
-              ✓ Account updated successfully
-            </div>
-          )}
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <button type="submit" className="btn btn-primary" disabled={accountSaving}>
-              {accountSaving ? 'Saving…' : 'Save Changes'}
-            </button>
-          </div>
-        </form>
-      </div>
+      <h1 className="page-title">Plans</h1>
 
       {/* Current Plan */}
       <div className="card" style={{ marginBottom: 16 }}>
@@ -385,7 +312,12 @@ export default function Settings() {
             <div>
               <div style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--blue)' }}>{currentPlan.name}</div>
               <div style={{ fontSize: '.82rem', color: 'var(--muted)', marginTop: 2 }}>
-                {currentPlan.department} · {currentPlan.duration_years} years · {currentPlan.start_year}–{currentPlan.start_year + currentPlan.duration_years - 1}
+                {currentPlan.plan_type === 'double_major' && currentPlan.secondary_department
+                  ? `${currentPlan.department} & ${currentPlan.secondary_department}`
+                  : currentPlan.plan_type === 'major_minor' && currentPlan.secondary_department
+                  ? `${currentPlan.department} + ${currentPlan.secondary_department} (Minor)`
+                  : currentPlan.department
+                } · {currentPlan.duration_years} years · {currentPlan.start_year}–{currentPlan.start_year + currentPlan.duration_years - 1}
               </div>
             </div>
             <button className="btn btn-danger btn-sm" onClick={() => handleDelete(currentPlan.id)}>
@@ -432,11 +364,7 @@ export default function Settings() {
               >
                 Preview ↗
               </a>
-              <button
-                className="btn btn-danger btn-sm"
-                onClick={handleRevokeLink}
-                disabled={shareWorking}
-              >
+              <button className="btn btn-danger btn-sm" onClick={handleRevokeLink} disabled={shareWorking}>
                 {shareWorking ? 'Revoking…' : 'Revoke Link'}
               </button>
             </div>
@@ -446,11 +374,7 @@ export default function Settings() {
             <p style={{ fontSize: '.84rem', color: 'var(--muted)', marginTop: 0, marginBottom: 12 }}>
               Generate a read-only link for <strong>{currentPlan.name}</strong> that anyone can view without logging in.
             </p>
-            <button
-              className="btn btn-primary"
-              onClick={handleGenerateLink}
-              disabled={shareWorking}
-            >
+            <button className="btn btn-primary" onClick={handleGenerateLink} disabled={shareWorking}>
               {shareWorking ? 'Generating…' : '🔗 Generate Share Link'}
             </button>
           </>
@@ -526,10 +450,7 @@ export default function Settings() {
           departments={departments}
           onSaved={(updated) => {
             reload()
-            // If the edited plan is the currently active one, refresh the plan context
-            if (updated.id === currentPlanId) {
-              setCurrentPlanId(updated.id)
-            }
+            if (updated.id === currentPlanId) setCurrentPlanId(updated.id)
           }}
           onClose={() => setEditingPlan(null)}
         />

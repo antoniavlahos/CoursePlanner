@@ -340,10 +340,18 @@ export default function AiPlanner() {
     setPlanLoading(true); setPlanError(''); setProgramPlan(null); setAppliedSet(new Set())
     try {
       const pcs = await getPlanCourses(currentPlanId)
-      const completed = pcs.filter((pc) => pc.status === 'completed').map((pc) => pc.course.course_number)
+      // Transfer credits: year=0 & semester=0 sentinels — always excluded regardless of status
+      const transferCredits = pcs
+        .filter((pc) => pc.year === 0 && pc.semester === 0)
+        .map((pc) => pc.course.course_number)
+      // Completed regular courses (excludes transfer credits to avoid double-counting)
+      const completed = pcs
+        .filter((pc) => pc.status === 'completed' && !(pc.year === 0 && pc.semester === 0))
+        .map((pc) => pc.course.course_number)
       const result = await getAiProgramPlan({
         interests,
         completed_courses: completed,
+        transfer_credits: transferCredits,
         department: currentPlan?.department ?? 'CS',
         duration_years: currentPlan?.duration_years ?? 4,
         start_year: currentPlan?.start_year ?? 2025,

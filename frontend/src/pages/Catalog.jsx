@@ -1,26 +1,32 @@
 import { useState, useEffect, useCallback } from 'react'
 import { usePlan } from '../App.jsx'
-import { getCourses, getDepartments, addCourseToPlan } from '../api.js'
+import { getCourses, getDepartments, addCourseToPlan, updatePlanCourse } from '../api.js'
 import CourseDetailDrawer from '../components/CourseDetailDrawer.jsx'
 
 const TERMS = { 1: 'Fall', 2: 'Spring', 3: 'Summer' }
 
 // ── Add-to-Plan modal ─────────────────────────────────────────────────────────
 function AddModal({ course, plan, onClose, onAdded }) {
-  const [year, setYear] = useState(1)
+  const [destination, setDestination] = useState('semester') // 'semester' | 'transfer'
+  const [year, setYear]       = useState(1)
   const [semester, setSemester] = useState(1)
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
+  const [error, setError]     = useState('')
 
   const offeredTerms = course.terms_offered ?? []
-  const semName = TERMS[semester]
-  const notOffered = offeredTerms.length > 0 && !offeredTerms.includes(semName)
+  const semName      = TERMS[semester]
+  const notOffered   = destination === 'semester' && offeredTerms.length > 0 && !offeredTerms.includes(semName)
 
   async function handleAdd() {
     setLoading(true)
     setError('')
     try {
-      await addCourseToPlan(plan.id, { course_id: course.id, semester, year })
+      if (destination === 'transfer') {
+        const newPc = await addCourseToPlan(plan.id, { course_id: course.id, year: 0, semester: 0 })
+        if (newPc?.id) await updatePlanCourse(newPc.id, { status: 'completed' })
+      } else {
+        await addCourseToPlan(plan.id, { course_id: course.id, semester, year })
+      }
       onAdded()
       onClose()
     } catch (e) {
@@ -51,42 +57,77 @@ function AddModal({ course, plan, onClose, onAdded }) {
           </div>
         </div>
 
-        {/* Year picker */}
+        {/* Destination toggle */}
         <div className="form-group">
-          <label>Year</label>
+          <label>Add to</label>
           <div className="pill-group">
-            {Array.from({ length: plan.duration_years }, (_, i) => i + 1).map((y) => (
-              <label key={y}>
-                <input type="radio" name="year" value={y} checked={year === y} onChange={() => setYear(y)} />
-                Year {y}
-                <span className="pill-sub">{plan.start_year + y - 1}</span>
-              </label>
-            ))}
+            <label>
+              <input
+                type="radio" name="destination" value="semester"
+                checked={destination === 'semester'}
+                onChange={() => setDestination('semester')}
+              />
+              📅 Semester
+            </label>
+            <label>
+              <input
+                type="radio" name="destination" value="transfer"
+                checked={destination === 'transfer'}
+                onChange={() => setDestination('transfer')}
+              />
+              🎓 Transfer Credit
+            </label>
           </div>
         </div>
 
-        {/* Semester picker */}
-        <div className="form-group">
-          <label>Semester</label>
-          <div className="pill-group">
-            {[[ 1, 'Fall', '🍂' ], [ 2, 'Spring', '🌱' ], [ 3, 'Summer', '☀️' ]].map(([val, name, icon]) => (
-              <label key={val}>
-                <input type="radio" name="sem" value={val} checked={semester === val} onChange={() => setSemester(val)} />
-                {icon} {name}
-              </label>
-            ))}
-          </div>
-        </div>
-
-        {notOffered && (
+        {destination === 'transfer' ? (
           <div style={{
-            background: '#fffbea', color: '#92400e',
-            border: '1px solid #fcd34d', borderRadius: 8,
-            padding: '8px 12px', marginBottom: 8, fontSize: '.82rem',
+            background: '#fffbf5', color: '#92400e',
+            border: '1px solid #fed7aa', borderRadius: 8,
+            padding: '10px 14px', marginBottom: 8, fontSize: '.83rem', lineHeight: 1.5,
           }}>
-            ⚠️ <strong>{course.course_number}</strong> is typically offered in{' '}
-            {offeredTerms.join(' & ')} only. You can still add it.
+            This course will be added to your <strong>Transfer Credits</strong> card and marked as completed.
           </div>
+        ) : (
+          <>
+            {/* Year picker */}
+            <div className="form-group">
+              <label>Year</label>
+              <div className="pill-group">
+                {Array.from({ length: plan.duration_years }, (_, i) => i + 1).map((y) => (
+                  <label key={y}>
+                    <input type="radio" name="year" value={y} checked={year === y} onChange={() => setYear(y)} />
+                    Year {y}
+                    <span className="pill-sub">{plan.start_year + y - 1}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Semester picker */}
+            <div className="form-group">
+              <label>Semester</label>
+              <div className="pill-group">
+                {[[ 1, 'Fall', '🍂' ], [ 2, 'Spring', '🌱' ], [ 3, 'Summer', '☀️' ]].map(([val, name, icon]) => (
+                  <label key={val}>
+                    <input type="radio" name="sem" value={val} checked={semester === val} onChange={() => setSemester(val)} />
+                    {icon} {name}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {notOffered && (
+              <div style={{
+                background: '#fffbea', color: '#92400e',
+                border: '1px solid #fcd34d', borderRadius: 8,
+                padding: '8px 12px', marginBottom: 8, fontSize: '.82rem',
+              }}>
+                ⚠️ <strong>{course.course_number}</strong> is typically offered in{' '}
+                {offeredTerms.join(' & ')} only. You can still add it.
+              </div>
+            )}
+          </>
         )}
 
         {error && <div className="error-msg">{error}</div>}
@@ -94,7 +135,7 @@ function AddModal({ course, plan, onClose, onAdded }) {
         <div className="modal-actions">
           <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
           <button className="btn btn-success" onClick={handleAdd} disabled={loading}>
-            {loading ? 'Adding…' : '+ Add to Plan'}
+            {loading ? 'Adding…' : destination === 'transfer' ? '+ Add as Transfer Credit' : '+ Add to Plan'}
           </button>
         </div>
       </div>
