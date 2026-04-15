@@ -1,8 +1,9 @@
+import os
 import sqlite3
 import json
 from datetime import datetime
 
-DB_PATH = "purdue_courses.db"
+DB_PATH = os.environ.get('DB_PATH', 'purdue_courses.db')
 
 def create_database():
     conn = sqlite3.connect(DB_PATH)

@@ -68,6 +68,15 @@ A full-stack web application for planning a Purdue University degree program. Br
 
 ## Prerequisites
 
+### Docker (recommended)
+
+| Tool | Version |
+|------|---------|
+| Docker | 24+ |
+| Docker Compose | v2+ |
+
+### Local development
+
 | Tool | Version | Notes |
 |------|---------|-------|
 | Python | 3.10+ | Backend runtime |
@@ -76,7 +85,56 @@ A full-stack web application for planning a Purdue University degree program. Br
 
 ---
 
-## Setup
+## Docker (Recommended)
+
+The simplest way to run the app. A single container serves both the React frontend and the Flask API; the SQLite database is persisted in a named Docker volume.
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/antoniavlahos/CoursePlanner.git
+cd CoursePlanner
+```
+
+### 2. Build and start
+
+```bash
+docker compose up --build
+```
+
+Open your browser at **http://localhost:8000**.
+
+That's it. On first start the database is automatically seeded with the full Purdue course catalog.
+
+### Common commands
+
+```bash
+# Run in the background
+docker compose up --build -d
+
+# View logs
+docker compose logs -f
+
+# Stop
+docker compose down
+
+# Stop and wipe the database volume (full reset)
+docker compose down -v
+```
+
+### Environment variables
+
+Set these in `docker-compose.yml` or pass them with `-e`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JWT_SECRET` | `change-me-in-production` | Secret key for signing JWT tokens. **Change this before deploying.** |
+| `PORT` | `8000` | Port the server listens on inside the container |
+| `GUNICORN_WORKERS` | `4` | Number of gunicorn worker processes |
+
+---
+
+## Local Development Setup
 
 ### 1. Clone the repository
 
@@ -101,7 +159,13 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 3. Frontend
+### 3. Seed the database
+
+```bash
+python create_database.py
+```
+
+### 4. Frontend
 
 ```bash
 cd frontend
@@ -111,7 +175,7 @@ cd ..
 
 ---
 
-## Running the App
+## Running Locally
 
 Open **two terminals** — one for the backend, one for the frontend.
 
@@ -122,7 +186,7 @@ Open **two terminals** — one for the backend, one for the frontend.
 python app.py
 ```
 
-The API will be available at `http://127.0.0.1:5050`.
+The API will be available at `http://127.0.0.1:8000`.
 
 ### Terminal 2 — Frontend (Vite dev server)
 
@@ -167,9 +231,7 @@ The app auto-detects all available Ollama models at startup and prefers any `qwe
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `JWT_SECRET` | `dev-secret-change-in-production!` | Secret key for signing JWT tokens. **Change this in production.** |
+For local development, export before starting the backend:
 
 ```bash
 # macOS / Linux
@@ -179,15 +241,19 @@ export JWT_SECRET="your-long-random-secret"
 $env:JWT_SECRET = "your-long-random-secret"
 ```
 
+For Docker, set them in `docker-compose.yml` (see the Docker section above).
+
 ---
 
 ## Project Structure
 
 ```
 CoursePlanner/
+├── Dockerfile                # Multi-stage build (Node → Python)
+├── docker-compose.yml        # Single-service compose with persistent DB volume
+├── entrypoint.sh             # Seeds DB on first run, then launches gunicorn
 ├── app.py                    # Flask REST API (auth, courses, plans, AI, PDF, sharing)
-├── requirements.txt          # Python dependencies
-├── purdue_courses.db         # SQLite database
+├── requirements.txt          # Python dependencies (includes gunicorn)
 ├── create_database.py        # Script to initialise / seed the database
 ├── scrape_purdue_catalog.py  # Catalog scraper
 └── frontend/
@@ -207,5 +273,5 @@ CoursePlanner/
     │   └── components/
     │       └── CourseDetailDrawer.jsx
     ├── package.json
-    └── vite.config.js        # Dev server on :3000, proxies /api → :5050
+    └── vite.config.js        # Dev server on :3000, proxies /api → :8000
 ```

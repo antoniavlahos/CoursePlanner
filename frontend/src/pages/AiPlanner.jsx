@@ -269,6 +269,8 @@ export default function AiPlanner() {
 
   // Course search state
   const [aiAvailable, setAiAvailable]         = useState(null)
+  const [aiModel,     setAiModel]             = useState(null)
+  const [semanticSearch, setSemanticSearch]   = useState(false)
   const [interests, setInterests]             = useState('')
   const [recommendations, setRecommendations] = useState([])
   const [loading, setLoading]                 = useState(false)
@@ -299,7 +301,11 @@ export default function AiPlanner() {
 
   useEffect(() => {
     getAiStatus()
-      .then((s) => setAiAvailable(s.available))
+      .then((s) => {
+        setAiAvailable(s.available)
+        setAiModel(s.model || null)
+        setSemanticSearch(s.semantic_search || false)
+      })
       .catch(() => setAiAvailable(false))
   }, [])
 
@@ -541,14 +547,27 @@ export default function AiPlanner() {
               />
             </div>
 
+            {aiAvailable === true && (
+              <div style={{
+                background: '#f0fdf4', color: '#166534',
+                border: '1px solid #86efac', borderRadius: 8,
+                padding: '10px 14px', marginBottom: 12, fontSize: '.82rem',
+              }}>
+                ✓ <strong>Ollama</strong> — <code>{aiModel}</code>
+                {semanticSearch && <span> · <strong>Semantic search</strong> active</span>}
+              </div>
+            )}
+
             {aiAvailable === false && (
               <div style={{
                 background: '#fffbea', color: '#92400e',
                 border: '1px solid #fcd34d', borderRadius: 8,
                 padding: '10px 14px', marginBottom: 12, fontSize: '.82rem',
               }}>
-                <strong>Ollama not detected</strong> — results will use keyword matching.
-                {' '}To enable AI: <code>brew install ollama</code> → <code>ollama serve</code> → <code>ollama pull llama3.2</code>
+                <strong>Ollama AI re-ranking not enabled</strong>
+                {' '}— results will use {semanticSearch ? <strong>semantic search</strong> : 'keyword matching'}.
+                {' '}To enable: install <a href="https://ollama.com" target="_blank" rel="noreferrer"
+                   style={{ color: '#92400e' }}>Ollama</a> and run a model (e.g. <code>ollama run llama3</code>).
               </div>
             )}
 

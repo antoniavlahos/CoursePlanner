@@ -12,6 +12,7 @@ import urllib.request
 import urllib.error
 import os
 import concurrent.futures
+import requests
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Optional, List, Dict
@@ -29,7 +30,7 @@ except ImportError as e:
 JWT_SECRET = os.environ.get('JWT_SECRET', 'dev-secret-change-in-production!')
 JWT_EXP_DAYS = 30
 
-DB_PATH = "purdue_courses.db"
+DB_PATH = os.environ.get('DB_PATH', 'purdue_courses.db')
 
 # ── Data Classes ──────────────────────────────────────────────────────────────
 
@@ -245,23 +246,21 @@ class Database:
                 self.conn.commit()
 
     def get_plan_courses(self, plan_id: int) -> List[PlanCourse]:
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.execute(
-                """
-                SELECT pc.id, pc.semester, pc.year, pc.status, pc.grade, pc.semester_type,
-                       c.id, c.course_number, c.title, c.description, c.credits,
-                       c.department, c.prerequisites, c.corequisites, c.terms_offered
-                FROM plan_courses pc
-                JOIN courses c ON pc.course_id = c.id
-                WHERE pc.plan_id = ?
-                ORDER BY pc.year, pc.semester
-                """,
-                (plan_id,),
-            )
-            rows = cursor.fetchall()
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT pc.id, pc.semester, pc.year, pc.status, pc.grade, pc.semester_type,
+                   c.id, c.course_number, c.title, c.description, c.credits,
+                   c.department, c.prerequisites, c.corequisites, c.terms_offered
+            FROM plan_courses pc
+            JOIN courses c ON pc.course_id = c.id
+            WHERE pc.plan_id = ?
+            ORDER BY pc.year, pc.semester
+            """,
+            (plan_id,),
+        )
         results = []
-        for row in rows:
+        for row in cursor.fetchall():
             course = Course(
                 id=row[6], course_number=row[7], title=row[8],
                 description=row[9], credits=row[10], department=row[11],
@@ -406,6 +405,93 @@ _STOP_WORDS = {
     'new', 'use', 'used', 'using', 'need', 'needed', 'able', 'help', 'make',
 }
 
+# ── Semantic search (sentence embeddings) ────────────────────────────────────
+# Loaded lazily on first use so the app starts fast even without embeddings.
+
+_embed_model  = None   # SentenceTransformer instance
+_embed_matrix = None   # np.ndarray  shape (N, 384), float32, unit-normalised
+_embed_ids    = None   # list[int]   course DB ids in the same row order
+
+def _load_embeddings():
+    """Load the sentence-transformer model and all stored course embeddings.
+
+    Called once on the first semantic-search request.  Safe to call multiple
+    times — subsequent calls are no-ops.
+    """
+    global _embed_model, _embed_matrix, _embed_ids
+    if _embed_model is not None:
+        return  # already loaded
+
+    try:
+        import numpy as np
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        return  # library not installed — fall back to keyword search silently
+
+    model_name = 'all-MiniLM-L6-v2'
+    print(f'Semantic search: loading model {model_name!r} …', flush=True)
+    _embed_model = SentenceTransformer(model_name)
+
+    # Pull every row that has a stored embedding
+    try:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        rows = conn.execute(
+            'SELECT id, embedding FROM courses WHERE embedding IS NOT NULL'
+        ).fetchall()
+        conn.close()
+    except sqlite3.OperationalError as e:
+        print(f'Semantic search: DB error ({e}) — run generate_embeddings.py first.')
+        _embed_model = None
+        return
+
+    if not rows:
+        print('Semantic search: no embeddings found in DB — run generate_embeddings.py first.')
+        _embed_model = None
+        return
+
+    _embed_ids    = [r[0] for r in rows]
+    _embed_matrix = np.stack([
+        np.frombuffer(r[1], dtype=np.float32) for r in rows
+    ])  # shape (N, 384)
+    print(f'Semantic search: loaded {len(_embed_ids)} embeddings ({_embed_matrix.nbytes // 1024} KB).')
+
+
+def _semantic_search(query: str, courses: List[Course], top_n: int = 40) -> List[tuple]:
+    """Rank courses by cosine similarity to the query embedding.
+
+    Falls back to keyword search if embeddings are unavailable.
+    Returns a list of (score, Course) tuples sorted by descending similarity.
+    """
+    _load_embeddings()
+
+    if _embed_model is None or _embed_matrix is None:
+        # Embeddings not available — fall back gracefully
+        return _keyword_search(query, courses, top_n)
+
+    import numpy as np
+
+    # Embed the query (unit-normalised → dot product == cosine similarity)
+    q_vec = _embed_model.encode(
+        query, convert_to_numpy=True, normalize_embeddings=True
+    ).astype(np.float32)
+
+    # Build a fast id→Course lookup restricted to the supplied course list
+    course_map = {c.id: c for c in courses}
+
+    # Score only the rows whose course_id is in the supplied list
+    # (avoids ranking courses the caller has already excluded)
+    valid_mask = [i for i, cid in enumerate(_embed_ids) if cid in course_map]
+    if not valid_mask:
+        return _keyword_search(query, courses, top_n)
+
+    sub_matrix = _embed_matrix[valid_mask]          # (M, 384)
+    sub_ids    = [_embed_ids[i] for i in valid_mask]
+
+    scores = sub_matrix @ q_vec                     # cosine similarity, shape (M,)
+    top_indices = scores.argsort()[::-1][:top_n]
+
+    return [(float(scores[i]), course_map[sub_ids[i]]) for i in top_indices]
+
 
 # ── Year-level appropriateness ────────────────────────────────────────────────
 # Maps academic year → (min_course_level, max_course_level)
@@ -466,57 +552,59 @@ def _keyword_search(query: str, courses: List[Course], top_n: int = 40) -> List[
     return scored[:top_n]
 
 
-# ── LLM planner ───────────────────────────────────────────────────────────────
+# ── LLM planner (Ollama) ─────────────────────────────────────────────────────
+#
+# Requires Ollama running locally: https://ollama.com
+#
+# Set the host via environment variable (default: http://localhost:11434):
+#   export OLLAMA_HOST="http://localhost:11434"
+#
+# Falls back to semantic/keyword search automatically when Ollama is not running.
+
+_DEFAULT_OLLAMA_HOST  = 'http://localhost:11434'
+_DEFAULT_OLLAMA_MODEL = 'llama3'
 
 class LLMCoursePlanner:
     def __init__(self):
-        self.base_url = "http://localhost:11434"
+        self.host  = os.environ.get('OLLAMA_HOST', _DEFAULT_OLLAMA_HOST).rstrip('/')
         self.model = None
         self._detect_model()
 
     def _detect_model(self):
-        """Pick the best available Ollama model.
-        Preference order: any qwen variant → first available model → None (unavailable)."""
+        preferred = os.environ.get('OLLAMA_MODEL', '').strip()
         try:
-            req = urllib.request.Request(f"{self.base_url}/api/tags")
-            with urllib.request.urlopen(req, timeout=5) as response:
-                data   = json.loads(response.read().decode('utf-8'))
-                models = [m['name'] for m in data.get('models', [])]
-                if not models:
-                    return
-                # Prefer any qwen variant, otherwise use the first model
-                qwen = next((m for m in models if 'qwen' in m.lower()), None)
-                self.model = qwen or models[0]
-                print(f"LLM: using model '{self.model}'")
-        except Exception:
-            pass
+            resp = requests.get(f"{self.host}/api/tags", timeout=3)
+            if resp.status_code == 200:
+                models = [m['name'] for m in resp.json().get('models', [])]
+                if preferred and any(preferred in m for m in models):
+                    self.model = preferred
+                elif models:
+                    # prefer llama3 variants, else first available
+                    llama = [m for m in models if 'llama3' in m.lower()]
+                    self.model = llama[0] if llama else models[0]
+                    print(f"LLM: Ollama detected, using model '{self.model}'")
+        except Exception as e:
+            print(f"LLM: Ollama not available at {self.host} — {e}")
+            self.model = None
 
     def is_available(self) -> bool:
-        if not self.model:
-            return False
-        try:
-            req = urllib.request.Request(f"{self.base_url}/api/tags")
-            urllib.request.urlopen(req, timeout=5)
-            return True
-        except Exception:
-            return False
+        if self.model is None:
+            self._detect_model()
+        return self.model is not None
 
     def get_recommendations(self, interests: str, completed: List[str],
                             department: str, candidate_courses: List[Course] = None) -> List[dict]:
-        """Two-phase recommendation: caller pre-filters candidates via keyword search,
-        then this method asks the LLM to pick the 5-8 most relevant, given each
-        course's actual title and description so it can reason accurately."""
+        """Ask Ollama to pick the 5-8 most relevant courses from the pre-filtered candidate list."""
         if not self.is_available() or not candidate_courses:
             return []
 
-        # Build a compact catalogue block: course_number: title — description_preview
+        # Build a compact catalogue block
         course_lines = []
         for c in candidate_courses:
             desc = (c.description or '').replace('\n', ' ')[:80].strip()
-            if desc:
-                course_lines.append(f"{c.course_number}: {c.title} — {desc}")
-            else:
-                course_lines.append(f"{c.course_number}: {c.title}")
+            course_lines.append(
+                f"{c.course_number}: {c.title}" + (f" — {desc}" if desc else "")
+            )
 
         course_block  = '\n'.join(course_lines)
         completed_str = ', '.join(completed) if completed else 'none'
@@ -533,52 +621,49 @@ class LLMCoursePlanner:
             '[{"course_number": "DEPT 00000", "reason": "one sentence explaining relevance"}, ...]'
         )
 
-        LLM_TIMEOUT = 30   # wall-clock seconds; increase if your hardware is fast enough
+        LLM_TIMEOUT = 60
 
-        def _do_llm_call():
-            payload = json.dumps({"model": self.model, "prompt": prompt, "stream": False}).encode()
-            req = urllib.request.Request(
-                f"{self.base_url}/api/generate",
-                data=payload,
-                headers={'Content-Type': 'application/json'},
+        def _do_ollama_call():
+            resp = requests.post(
+                f"{self.host}/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "options": {"temperature": 0.2},
+                },
+                timeout=LLM_TIMEOUT,
             )
-            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as response:
-                return json.loads(response.read().decode())
+            resp.raise_for_status()
+            return resp.json()['message']['content']
 
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_do_llm_call)
+                future = executor.submit(_do_ollama_call)
                 try:
-                    result = future.result(timeout=LLM_TIMEOUT)
+                    text = future.result(timeout=LLM_TIMEOUT + 5)
                 except concurrent.futures.TimeoutError:
                     future.cancel()
-                    print(f"LLM timed out after {LLM_TIMEOUT}s — using keyword fallback")
+                    print(f"LLM timed out after {LLM_TIMEOUT}s — using semantic fallback")
                     return []
 
-            text = result.get('response', '')
-
-            # Ollama ≥0.17 surfaces reasoning in a separate 'thinking' field;
-            # strip legacy <think>…</think> tags just in case.
+            # Strip any accidental code fences or think tags
             text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
             text = re.sub(r'```[a-z]*\n?', '', text)
 
             start = text.find('[')
             end   = text.rfind(']') + 1
             if start == -1 or end <= start:
-                print(f"LLM: no JSON array found in response: {text[:300]}")
+                print(f"LLM: no JSON array in response: {text[:300]}")
                 return []
 
             recs = json.loads(text[start:end])
-            db = Database()
-            out = []
+            db   = Database()
+            out  = []
             for r in recs:
                 c = db.get_course_by_number(r.get('course_number', '').strip())
                 if c:
-                    out.append({
-                        'course': c.to_dict(),
-                        'reason': r.get('reason', ''),
-                        'ai_ranked': True,
-                    })
+                    out.append({'course': c.to_dict(), 'reason': r.get('reason', ''), 'ai_ranked': True})
                 else:
                     print(f"LLM recommended unknown course: {r.get('course_number')}")
             db.close()
@@ -591,7 +676,9 @@ class LLMCoursePlanner:
 
 # ── Flask App ─────────────────────────────────────────────────────────────────
 
-app = Flask(__name__)
+app = Flask(__name__,
+            static_folder=os.path.join(os.path.dirname(__file__), 'frontend', 'dist'),
+            static_url_path='')
 CORS(app)
 _db = Database()
 _llm = LLMCoursePlanner()
@@ -854,7 +941,13 @@ def update_plan_course(pc_id):
 
 @app.route('/api/ai/status')
 def ai_status():
-    return jsonify({'available': _llm.is_available(), 'model': _llm.model})
+    return jsonify({
+        'available':         _llm.is_available(),
+        'model':             _llm.model if _llm.is_available() else None,
+        'provider':          'ollama',
+        'semantic_search':   _embed_matrix is not None,
+        'embeddings_count':  len(_embed_ids) if _embed_ids else 0,
+    })
 
 
 @app.route('/api/ai/recommend', methods=['POST'])
@@ -869,10 +962,9 @@ def ai_recommend():
 
     all_courses = _db.get_all_courses()
 
-    # ── Phase 1: keyword search across ALL 6 000+ courses ─────────────────────
-    # Score every course by how many query keywords appear in its title (3×)
-    # and description (1×).  Returns the top-40 most relevant candidates.
-    keyword_hits = _keyword_search(interests, all_courses, top_n=40)
+    # ── Phase 1: semantic search across ALL 6 000+ courses ───────────────────
+    # Uses sentence embeddings when available, falls back to keyword matching.
+    keyword_hits = _semantic_search(interests, all_courses, top_n=40)
 
     # Also pull in courses from the student's own department so they always
     # appear as candidates even when the query is very broad.
@@ -1090,7 +1182,7 @@ def ai_program_plan():
         all_courses   = _db.get_all_courses()
         excluded      = set(courses_to_schedule.keys()) | completed_set
         elective_pool = [c for c in all_courses if c.course_number not in excluded]
-        elective_hits = _keyword_search(interests, elective_pool, top_n=40)
+        elective_hits = _semantic_search(interests, elective_pool, top_n=40)
         electives: List[Course] = [c for _, c in elective_hits]
 
         # Build a per-semester elective pool sorted by level appropriateness,
@@ -1648,9 +1740,25 @@ def download_plan_pdf(plan_id):
     )
 
 
+# ── Frontend catch-all (serves React for any non-API route) ──────────────────
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_frontend(path):
+    """Serve the React SPA for all non-API routes."""
+    dist = app.static_folder
+    # Serve the file directly if it exists (JS, CSS, assets, etc.)
+    full = os.path.join(dist, path)
+    if path and os.path.exists(full):
+        return app.send_static_file(path)
+    # Fall back to index.html so React Router handles the route
+    return app.send_static_file('index.html')
+
+
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    print("Purdue Course Planner API running at http://127.0.0.1:5050")
-    print("Start the React frontend with: cd frontend && npm run dev")
-    app.run(host='127.0.0.1', port=5050, debug=True)
+    port = int(os.environ.get('PORT', 8000))
+    debug = os.environ.get('FLASK_DEBUG', '0') == '1'
+    print(f"Purdue Course Planner running at http://0.0.0.0:{port}")
+    app.run(host='0.0.0.0', port=port, debug=debug)

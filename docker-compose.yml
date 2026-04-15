@@ -1,0 +1,22 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - db-data:/app/data
+    environment:
+      DB_PATH: "/app/data/purdue_courses.db"
+      PORT: "8000"
+      GUNICORN_WORKERS: "4"
+      JWT_SECRET: "change-me-in-production"
+      # Ollama host — use host.docker.internal to reach Ollama on the host machine
+      OLLAMA_HOST: "http://host.docker.internal:11434"
+      # Optional: pin a specific model (default: auto-detect first available)
+      # OLLAMA_MODEL: "llama3"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  db-data:

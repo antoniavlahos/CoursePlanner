@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Frontend dev artifacts (the Dockerfile builds these inside Docker)
+frontend/node_modules/
+frontend/dist/
+
+# Git & editor
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Docs & scripts not needed at runtime
+README.md
+SPEC.md
+scrape_purdue_catalog.py
+
+# Misc
+*.log
+.DS_Store
